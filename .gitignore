@@ -166,3 +166,5 @@ cython_debug/
 prof_material
 *.pdf
 deepl_env/
+data/
+risiko_object_detector/
