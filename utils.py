@@ -1,7 +1,4 @@
 import torch
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 from collections import Counter
 
 def intersection_over_union(boxes_preds, boxes_labels):
@@ -52,13 +49,13 @@ def non_max_iou_suppression(bboxes, iou_threshold):
         list: bboxes after performing NMS given a specific IoU threshold
     """
 
-    #assert type(bboxes) == list
 
     bboxes = sorted(bboxes, key=lambda x: x[1], reverse=True)
     bboxes_after_nms = []
 
     while bboxes:
         chosen_box = bboxes.pop(0)
+
 
         bboxes = [
             box for box in bboxes
