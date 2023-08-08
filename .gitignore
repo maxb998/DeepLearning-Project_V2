@@ -6,4 +6,7 @@ env/
 
 # User
 Datasets/Professor_Material
+Datasets/Generated_Dataset/images
+Datasets/Generated_Dataset/labels
 *.pdf
+

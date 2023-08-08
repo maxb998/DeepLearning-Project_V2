@@ -4,21 +4,18 @@ import os, cv2, colorsys, copy, argparse, importlib
 import numpy as np    ## if you haven't got it, just "pip3 install numpy"
 import open3d as o3d  ## if you haven't got it, just "pip3 install open3d"
 from tqdm import tqdm ## if you haven't got it, just "pip3 install tqdm"
+#from importlib import reload
+import time
 
 
 ## General Params
-img_width, img_height = 1920, 1080
-images_to_gen_num = 1
-max_tanks_in_image_num = 100
-max_flags_in_image_num = 40
+img_width, img_height = 1500, 1500
+min_obj_size, max_obj_size = 15, 500
 max_fails = 10
-max_area_overlap = 0.6
-
-max_color_brightness_reduction = 1/2
-max_color_singleval_delta = 1/20
+max_area_overlap = 0.75
 
 ## Rendering Params
-render_res = 400
+render_res = 500
 center = [0, 0, 0]  # look_at target
 rpy_amp    = 10         # rotation span (for randomly drawing)
 
@@ -63,8 +60,8 @@ def create_renderer():
     up = [0, 1, 0]  # camera orientation
     render.scene.camera.look_at(center, eye, up)
 
-    global add_geometry_count
-    add_geometry_count = 0
+    #global add_geometry_count
+    #add_geometry_count = 0
 
     global meshes
     meshes = [o3d.io.read_triangle_mesh("3D_models/Risiko_Tank_v3.stl"), o3d.io.read_triangle_mesh("3D_models/RisikoFlag_V2.stl")]
@@ -102,15 +99,15 @@ def create_obj(obj_class:int, rescaled_size:int) -> tuple[np.ndarray, np.ndarray
     mesh_r.rotate(R, center=center)
 
     render.scene.add_geometry("rotated_model", mesh_r, mtl)
-    global add_geometry_count
-    add_geometry_count = add_geometry_count + 1
+    #global add_geometry_count
+    #add_geometry_count = add_geometry_count + 1
 
     # Read the image into a variable
     rendered_img = np.array(render.render_to_image())
     render.scene.remove_geometry("rotated_model")
 
     rendered_img = rendered_img.astype(np.uint8)
-    rendered_img = cv2.resize(rendered_img, [rescaled_size, rescaled_size], interpolation=cv2.INTER_CUBIC)
+    rendered_img = cv2.resize(rendered_img, [rescaled_size, rescaled_size], interpolation=cv2.INTER_LINEAR)
     imgray = cv2.cvtColor(rendered_img, cv2.COLOR_RGB2GRAY)
     
     min_vals = np.max(imgray, axis=1)
@@ -142,8 +139,10 @@ def cmp_box_intersection_w_areas(newbox:np.ndarray, oldboxes:np.ndarray, nboxes:
     
     return True
 
-def add_single_element(img:np.ndarray, obj_class:int, previous_elems:np.ndarray, iternum:int, box_size:int, rnd_gen_offsets:np.ndarray) -> bool:
+def add_single_element(img:np.ndarray, obj_class:int, previous_elems:np.ndarray, iternum:int, box_size:int) -> bool:
     obj, mask = create_obj(obj_class, box_size)
+
+    rnd_gen_offsets = np.array([img_width, img_height], dtype=np.float32) - (box_size+1)
     
     # decide position for the new object
     fails = 0
@@ -171,14 +170,12 @@ def add_single_element(img:np.ndarray, obj_class:int, previous_elems:np.ndarray,
 def add_armies(img:np.ndarray, boxes_coords:np.ndarray, ntanks:int, nflags:int, obj_size_px:int) -> bool:
     box_counter = 0
 
-    rnd_gen_offsets = np.array([img_width, img_height], dtype=np.float32) - (obj_size_px+1)
-
     for i in range(ntanks):
-         if not add_single_element(img, np.random.randint(6), boxes_coords, box_counter, obj_size_px, rnd_gen_offsets): return False
+         if not add_single_element(img, np.random.randint(6), boxes_coords, box_counter, obj_size_px): return False
          box_counter += 1
     
     for i in range(nflags):
-        if not add_single_element(img, np.random.randint(6,12), boxes_coords, box_counter, obj_size_px, rnd_gen_offsets): return False
+        if not add_single_element(img, np.random.randint(6,12), boxes_coords, box_counter, obj_size_px): return False
         box_counter += 1
     
     return True
@@ -202,24 +199,23 @@ def generate_dataset(n:int, backgrounds:list[str], dst_path:str, max_tanks:int=8
 
     pbar = tqdm(total=n)
 
-    i = 0
+    i = len(os.listdir(out_imgs_dir))
+    n += i
     while i < n:
         img = cv2.resize(cv2.imread(backgrounds[np.random.randint(len(backgrounds))], cv2.IMREAD_COLOR), [img_width, img_height])
 
-        # to avoid segmentation fault of open3d due to bug -> recreate render workaround
-        if add_geometry_count // 65000 >= 1:
-            del render
-            importlib.reload(o3d)
-            render = create_renderer()
+        # to avoid segmentation fault of open3d due to bug -> recreate render and reload open3d workaround
+        # if add_geometry_count // 65000 >= 1:
+        #     del render
+        #     global meshes
+        #     del meshes
+        #     reload(o3d)
+
+        #     render = create_renderer()
         
         # need to decide how many tanks and flags to add based on the size of the objects themself or viceversa
         ntanks, nflags = np.random.randint(max_tanks), np.random.randint(max_flags)
-        mu, std = 50, 80
-        while True:
-            std += 50
-            obj_size = int(np.round(np.random.normal(mu, std)))
-            if (obj_size - 6) >= 0 and obj_size < 300:
-                break
+        obj_size = np.random.randint(15, 500)
 
         boxes = np.zeros([ntanks + nflags, 5], dtype=np.int32)
         if not add_armies(img, boxes, ntanks, nflags, obj_size):
@@ -268,6 +264,8 @@ def main():
     n, ntanks, nflags = args.nimgs, args.ntanks, args.nflags
 
     backgrounds = [os.path.join(dp, f) for dp, dn, filenames in os.walk(background_dir) for f in filenames if os.path.splitext(f)[1] in [".jpg", ".JPG"]]
+
+    np.random.seed(int(time.time()))
 
     generate_dataset(n, backgrounds, output_dir, ntanks, nflags)
     
