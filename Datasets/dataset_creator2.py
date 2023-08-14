@@ -10,9 +10,9 @@ import time
 
 ## General Params
 img_width, img_height = 1000, 1000
-min_obj_size, max_obj_size = 10, 250
+min_obj_size, max_obj_size = 15, 250
 max_fails = 20
-max_area_overlap = 0.8
+max_area_overlap = 0.6
 
 ## Rendering Params
 render_res = 400
