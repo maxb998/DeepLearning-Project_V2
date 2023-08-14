@@ -9,13 +9,13 @@ import time
 
 
 ## General Params
-img_width, img_height = 1500, 1500
-min_obj_size, max_obj_size = 15, 300
-max_fails = 10
+img_width, img_height = 1000, 1000
+min_obj_size, max_obj_size = 10, 250
+max_fails = 20
 max_area_overlap = 0.8
 
 ## Rendering Params
-render_res = 500
+render_res = 400
 center = [0, 0, 0]  # look_at target
 rpy_amp    = 10         # rotation span (for randomly drawing)
 
@@ -215,7 +215,7 @@ def generate_dataset(n:int, backgrounds:list[str], dst_path:str, max_tanks:int=8
         
         # need to decide how many tanks and flags to add based on the size of the objects themself or viceversa
         ntanks, nflags = np.random.randint(max_tanks), np.random.randint(max_flags)
-        obj_size = np.random.randint(15, 500)
+        obj_size = np.random.randint(min_obj_size, max_obj_size)
 
         boxes = np.zeros([ntanks + nflags, 5], dtype=np.int32)
         if not add_armies(img, boxes, ntanks, nflags, obj_size):
