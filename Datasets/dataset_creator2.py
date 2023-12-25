@@ -1,11 +1,9 @@
 
 #from matplotlib import pyplot as plt
-import os, cv2, colorsys, copy, argparse, importlib
-import numpy as np    ## if you haven't got it, just "pip3 install numpy"
-import open3d as o3d  ## if you haven't got it, just "pip3 install open3d"
-from tqdm import tqdm ## if you haven't got it, just "pip3 install tqdm"
-#from importlib import reload
-import time
+import os, cv2, colorsys, copy, argparse, time
+import numpy as np
+import open3d as o3d
+from tqdm import tqdm
 
 
 ## General Params
@@ -18,6 +16,8 @@ max_area_overlap = 0.6
 render_res = 400
 center = [0, 0, 0]  # look_at target
 rpy_amp    = 10         # rotation span (for randomly drawing)
+
+models_path = [ 'Datasets/3D_models/Risiko_Tank_v3.stl', 'Datasets/3D_models/RisikoFlag_V2.stl' ]
 
 # colors global variables
 base_rgb_colors = np.array([
@@ -35,7 +35,7 @@ hsv_offsets = np.array([
     [257/360,  0.7, 0.5], # purple
     [      0,    0,   0], # black
     [ 99/360,  0.7, 0.5]  # green
-], dtype=np.float32)
+], dtype=np.float64)
 hsv_scalers = np.array([
     [ 9/360, 0.12,  0.5], # blue
     [21/360, 0.12,  0.5], # red
@@ -43,68 +43,60 @@ hsv_scalers = np.array([
     [22/360,  0.3,  0.5], # purple
     [    1,   0.1, 0.05], # black
     [61/360,  0.3,  0.5]  # green
-], dtype=np.float32)
+], dtype=np.float64)
 
-def create_renderer():
-    render = o3d.visualization.rendering.OffscreenRenderer(render_res, render_res)
-    render.scene.scene.enable_sun_light(False)
-    render.scene.set_lighting(render.scene.LightingProfile.NO_SHADOWS, (0, 0, 0))
-    render.scene.set_background([0,0,0,0])
+def create_renderer(mesh_path:str) -> tuple[o3d.visualization.rendering.OffscreenRenderer, o3d.geometry.TriangleMesh]:
+
+    mesh = o3d.io.read_triangle_mesh(mesh_path)
+
+    renderer = o3d.visualization.rendering.OffscreenRenderer(render_res, render_res)
+    renderer.scene.scene.enable_sun_light(False)
+    renderer.scene.set_lighting(renderer.scene.LightingProfile.NO_SHADOWS, (0, 0, 0))
+    renderer.scene.set_background([0,0,0,0])
 
     v_fov      = 15.0       # vertical field of view: between 5 and 90 degrees
     near_plane = 0.1
     far_plane  = 1e3
     fov_type = o3d.visualization.rendering.Camera.FovType.Vertical
-    render.scene.camera.set_projection(v_fov, 1, near_plane, far_plane, fov_type)
+    renderer.scene.camera.set_projection(v_fov, 1, near_plane, far_plane, fov_type)
     eye = [0, 0, 90]  # camera position
     up = [0, 1, 0]  # camera orientation
-    render.scene.camera.look_at(center, eye, up)
+    renderer.scene.camera.look_at(center, eye, up)
 
-    #global add_geometry_count
-    #add_geometry_count = 0
+    mesh_copy = copy.deepcopy(mesh)
+    renderer.scene.add_geometry("myobj", mesh_copy, create_material_record(0))
 
-    global meshes
-    meshes = [o3d.io.read_triangle_mesh("3D_models/Risiko_Tank_v3.stl"), o3d.io.read_triangle_mesh("3D_models/RisikoFlag_V2.stl")]
+    return renderer, mesh
 
-    return render
+def create_material_record(obj_class:int) -> o3d.visualization.rendering.MaterialRecord:
 
-def create_mtl(rgba_color:np.ndarray):
+    color = np.random.uniform(size=3).astype(np.float64)
+    color = color * hsv_scalers[obj_class % 6] + hsv_offsets[obj_class % 6]
+    rgba_color = np.ones(4, dtype=np.float64)
+    rgba_color[:3] = colorsys.hsv_to_rgb(color[0], color[1], color[2])
+
     mtl = o3d.visualization.rendering.MaterialRecord()    # or MaterialRecord(), for later versions of Open3D
     mtl.base_color = rgba_color  # RGBA
     mtl.shader = "defaultLit"
+
     return mtl
 
-def generate_color_using_hsv(obj_class:int) -> np.ndarray:
-    color = np.random.uniform(size=3).astype(np.float32)
-    color = color * hsv_scalers[obj_class % 6] + hsv_offsets[obj_class % 6]
-    rgba_color = np.ones(4, dtype=np.float32)
-    rgba_color[:3] = colorsys.hsv_to_rgb(color[0], color[1], color[2])
-    return rgba_color
+def modify_obj(renderer:o3d.visualization.rendering.OffscreenRenderer, mesh:o3d.geometry.TriangleMesh, obj_class:int):
 
-def create_obj(obj_class:int, rescaled_size:int) -> tuple[np.ndarray, np.ndarray]:
-    '''
-    Function renders model of object specified by class in a random "pose" (rotated on all three axis in a random way)
-    Returns a tuple containing 2 images:
-        - [0] -> actual rgb image of the object with white background
-        - [1] -> mask of the first image useful to paste the object alone without the background
-    '''
+    # change obj color
+    material = create_material_record(obj_class)
+    renderer.scene.modify_geometry_material('myobj', material)
 
-    color = generate_color_using_hsv(obj_class)
-    mtl = create_mtl(color)
+    # rotate obj
+    rotation_mat = np.eye(N=4, dtype=np.float64)
+    rotation_mat[0:3,0:3] = mesh.get_rotation_matrix_from_xyz((np.random.rand(3) * rpy_amp))
+    renderer.scene.set_geometry_transform('myobj', rotation_mat)
 
-    roll, pitch, yaw = np.random.rand()*rpy_amp, np.random.rand()*rpy_amp, np.random.rand()*rpy_amp
 
-    mesh_r = copy.deepcopy(meshes[obj_class // 6])
-    R = mesh_r.get_rotation_matrix_from_xyz((roll, pitch, yaw))
-    mesh_r.rotate(R, center=center)
-
-    render.scene.add_geometry("rotated_model", mesh_r, mtl)
-    #global add_geometry_count
-    #add_geometry_count = add_geometry_count + 1
+def render_obj(renderer:o3d.visualization.rendering.OffscreenRenderer, rescaled_size:int) -> np.ndarray:
 
     # Read the image into a variable
-    rendered_img = np.array(render.render_to_image())
-    render.scene.remove_geometry("rotated_model")
+    rendered_img = np.array(renderer.render_to_image())
 
     rendered_img = rendered_img.astype(np.uint8)
     rendered_img = cv2.resize(rendered_img, [rescaled_size, rescaled_size], interpolation=cv2.INTER_LINEAR)
@@ -119,7 +111,7 @@ def create_obj(obj_class:int, rescaled_size:int) -> tuple[np.ndarray, np.ndarray
 
     return cv2.cvtColor(rendered_img[x1:x2, y1:y2], cv2.COLOR_BGR2RGB), imgray[x1:x2, y1:y2]>1
 
-def cmp_box_intersection_w_areas(newbox:np.ndarray, oldboxes:np.ndarray, nboxes:int) -> bool:
+def cmp_box_intersection_w_areas(newbox:np.ndarray, oldboxes:np.ndarray, nboxes:int) -> tuple[np.ndarray, np.ndarray]:
     x21, y21, x22, y22 = np.split(oldboxes[:nboxes-1], 4, axis=1)
 
     xA = np.maximum(newbox[0], np.transpose(x21))
@@ -139,8 +131,10 @@ def cmp_box_intersection_w_areas(newbox:np.ndarray, oldboxes:np.ndarray, nboxes:
     
     return True
 
-def add_single_element(img:np.ndarray, obj_class:int, previous_elems:np.ndarray, iternum:int, box_size:int) -> bool:
-    obj, mask = create_obj(obj_class, box_size)
+def add_single_element(renderer:o3d.visualization.rendering.OffscreenRenderer, mesh:o3d.geometry.TriangleMesh, img:np.ndarray, obj_class:int, previous_elems:np.ndarray, iternum:int, box_size:int) -> bool:
+
+    modify_obj(renderer, mesh, obj_class)
+    obj, mask = render_obj(renderer, box_size)
 
     rnd_gen_offsets = np.array([img_width, img_height], dtype=np.float32) - (box_size+1)
     
@@ -167,15 +161,15 @@ def add_single_element(img:np.ndarray, obj_class:int, previous_elems:np.ndarray,
     return True
 
 
-def add_armies(img:np.ndarray, boxes_coords:np.ndarray, ntanks:int, nflags:int, obj_size_px:int) -> bool:
+def add_armies(renderers:list, meshes:list, img:np.ndarray, boxes_coords:np.ndarray, ntanks:int, nflags:int, obj_size_px:int) -> bool:
     box_counter = 0
 
     for i in range(ntanks):
-         if not add_single_element(img, np.random.randint(6), boxes_coords, box_counter, obj_size_px): return False
+         if not add_single_element(renderers[0], meshes[0], img, np.random.randint(6), boxes_coords, box_counter, obj_size_px): return False
          box_counter += 1
     
     for i in range(nflags):
-        if not add_single_element(img, np.random.randint(6,12), boxes_coords, box_counter, obj_size_px): return False
+        if not add_single_element(renderers[1], meshes[1], img, np.random.randint(6,12), boxes_coords, box_counter, obj_size_px): return False
         box_counter += 1
     
     return True
@@ -194,8 +188,12 @@ def generate_dataset(n:int, backgrounds:list[str], dst_path:str, max_tanks:int=8
     out_imgs_dir, out_lbls_dir = os.path.join(dst_path, "images"), os.path.join(dst_path, "labels")
     scale_arr = np.array([img_width, img_height, img_width, img_height], dtype=np.float32)
 
-    global render
-    render = create_renderer()
+    renderes = []
+    meshes = []
+    for mesh_path in models_path:
+        r, m = create_renderer(mesh_path)
+        renderes.append(r)
+        meshes.append(m)
 
     pbar = tqdm(total=n)
 
@@ -203,22 +201,13 @@ def generate_dataset(n:int, backgrounds:list[str], dst_path:str, max_tanks:int=8
     n += i
     while i < n:
         img = cv2.resize(cv2.imread(backgrounds[np.random.randint(len(backgrounds))], cv2.IMREAD_COLOR), [img_width, img_height])
-
-        # to avoid segmentation fault of open3d due to bug -> recreate render and reload open3d workaround
-        # if add_geometry_count // 65000 >= 1:
-        #     del render
-        #     global meshes
-        #     del meshes
-        #     reload(o3d)
-
-        #     render = create_renderer()
         
         # need to decide how many tanks and flags to add based on the size of the objects themself or viceversa
         ntanks, nflags = np.random.randint(max_tanks), np.random.randint(max_flags)
         obj_size = np.random.randint(min_obj_size, max_obj_size)
 
         boxes = np.zeros([ntanks + nflags, 5], dtype=np.int32)
-        if not add_armies(img, boxes, ntanks, nflags, obj_size):
+        if not add_armies(renderes, meshes,img, boxes, ntanks, nflags, obj_size):
             continue
 
         # save img and labels
@@ -237,11 +226,14 @@ def generate_dataset(n:int, backgrounds:list[str], dst_path:str, max_tanks:int=8
         i += 1
     pbar.close()
 
+    print('\nALL DONE! IGNORE THE ERROR\n')
+
+
 def main():
     parser = argparse.ArgumentParser(prog='dataset_generator', epilog='Risko dataset generator', description='Generate a synthetic dataset for the risiko problem')
-    parser.add_argument('-o', '--output_dir', metavar='OUTPUT_DIR', type=str, default="generated_dataset", help='Directory in which the dataset will be generated')
-    parser.add_argument('-b', '--backgrounds', metavar='BACKGROUNDS_DIR', type=str, default="backgrounds", help='Directory containing some images to use as backgrounds')
-    parser.add_argument('-n', '--nimgs', metavar='GENERATED_IMAGES_NUMBER', type=int, default=1000, help='number of images to generate')
+    parser.add_argument('-o', '--output_dir', metavar='OUTPUT_DIR', type=str, required=True, help='Directory in which the dataset will be generated')
+    parser.add_argument('-b', '--backgrounds', metavar='BACKGROUNDS_DIR', type=str, required=True, help='Directory containing some images to use as backgrounds')
+    parser.add_argument('-n', '--nimgs', metavar='GENERATED_IMAGES_NUMBER', type=int, required=True, help='number of images to generate')
     parser.add_argument('-t', '--ntanks', metavar='N_TANKS', type=int, default=80, help='Max number of tanks generated in each image')
     parser.add_argument('-f', '--nflags', metavar='N_FLAGS', type=int, default=20, help='Max number of flags generated in each image')
 
@@ -268,7 +260,6 @@ def main():
     np.random.seed(int(time.time()))
 
     generate_dataset(n, backgrounds, output_dir, ntanks, nflags)
-    
 
 if __name__ == "__main__":
     main()
