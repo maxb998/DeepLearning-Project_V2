@@ -15,7 +15,6 @@ class Params:
     minObjSize:int
     renderRes:int
     maxOverlap:float
-    renderCount:int = int(0)
     
 
 # CONSTANTS
@@ -106,6 +105,11 @@ def argParser() -> Params:
 
     p.maxOverlap = args.maxOverlap
 
+    if p.nimgs * (p.maxtanks + p.maxflags) / 2 > 131041:
+        print('Warning due to a bug in open3d, more than 131041 number of renders causes the camera to glitch, and it is likely that, given the current amounts of nimgs, maxtanks, and maxflags, such limit may be reached. The generation will stop before generating glitched images')
+    elif p.nimgs * (p.maxtanks + p.maxflags) / 2 > 131041 / 0.9:
+        print('Warning due to a bug in open3d, more than 131041 number of renders causes the camera to glitch, and it is possible that, given the current amounts of nimgs, maxtanks, and maxflags, such limit may be reached. The generation will stop before generating glitched images')
+    
     return p
 
 def create_renderer(p:Params) -> o3d.visualization.rendering.OffscreenRenderer:
@@ -215,7 +219,6 @@ def add_single_element(p:Params, renderer:o3d.visualization.rendering.OffscreenR
 
     modify_obj(renderer, obj_class)
     obj, mask = render_obj(renderer, box_size)
-    p.renderCount += 1
 
     rnd_gen_offsets = np.array([p.imgWidth, p.imgHeight], dtype=np.float32) - (box_size+1)
     
@@ -277,12 +280,13 @@ def generate_dataset(p:Params):
 
     renderer = create_renderer(p)
 
-    #pbar = tqdm(total=p.nimgs)
+    pbar = tqdm(total=p.nimgs)
 
     ntanks, nflags = 0, 0
 
     i = len(os.listdir(out_imgs_dir))
     n = p.nimgs + i
+    renderCount = int(0)
     while i < n:
         img = cv2.resize(cv2.imread(backgrounds[np.random.randint(len(backgrounds))], cv2.IMREAD_COLOR), [p.imgWidth, p.imgHeight])
         
@@ -291,29 +295,39 @@ def generate_dataset(p:Params):
             ntanks = np.random.randint(p.maxtanks)
         if p.maxflags > 0:
             np.random.randint(p.maxflags)
+        
+        renderCount += ntanks + nflags
 
-        obj_size = np.random.randint(p.minObjSize, p.maxObjSize)
+        if renderCount + ntanks + nflags < 131041:
 
-        boxes = np.zeros([ntanks + nflags, 5], dtype=np.int32)
-        if not add_armies(p, renderer, img, boxes, ntanks, nflags, obj_size):
-            continue
+            obj_size = np.random.randint(p.minObjSize, p.maxObjSize)
 
-        # save img and labels
-        filenum_str = str(i).zfill(8)
-        cv2.imwrite(os.path.join(out_imgs_dir, filenum_str + ".jpg"), img)
+            boxes = np.zeros([ntanks + nflags, 5], dtype=np.int32)
+            if not add_armies(p, renderer, img, boxes, ntanks, nflags, obj_size):
+                continue
 
-        boxes = boxes.astype(np.float32)
-        boxes[:, 3:] -= boxes[:, 1:3]
-        boxes[:, 1:3] += (boxes[:, 3:] / 2)
-        boxes[:, 1:] /= scale_arr
-        with open(os.path.join(out_lbls_dir, filenum_str + ".txt"), "w") as f:
-            for j in range(boxes.shape[0]):
-                f.write(str(int(boxes[j,0])) + " " + str(boxes[j,1]) + " " + str(boxes[j,2]) + " " + str(boxes[j,3]) + " " + str(boxes[j,4]) + "\n")
+            # save img and labels
+            filenum_str = str(i).zfill(8)
+            cv2.imwrite(os.path.join(out_imgs_dir, filenum_str + ".jpg"), img)
 
-        print('image num = ' + str(i - (n - p.nimgs)) + '\t  renderCount = ' + str(p.renderCount))
-        #pbar.update(1)
-        i += 1
-    #pbar.close()
+            boxes = boxes.astype(np.float32)
+            boxes[:, 3:] -= boxes[:, 1:3]
+            boxes[:, 1:3] += (boxes[:, 3:] / 2)
+            boxes[:, 1:] /= scale_arr
+            with open(os.path.join(out_lbls_dir, filenum_str + ".txt"), "w") as f:
+                for j in range(boxes.shape[0]):
+                    f.write(str(int(boxes[j,0])) + " " + str(boxes[j,1]) + " " + str(boxes[j,2]) + " " + str(boxes[j,3]) + " " + str(boxes[j,4]) + "\n")
+
+            pbar.update(1)
+            i += 1
+
+        else:
+            pbar.close()
+            print('Generation ended early at iteration ' + str(i - n + p.nimgs) + ' due to reaching the rendering limit of open3d(image glitch is generated otherwise)')
+            break
+
+    if (i >= n):
+        pbar.close()
 
 
 def main():
