@@ -294,7 +294,7 @@ def generate_dataset(p:Params):
         if p.maxtanks > 0:
             ntanks = np.random.randint(p.maxtanks)
         if p.maxflags > 0:
-            np.random.randint(p.maxflags)
+            nflags = np.random.randint(p.maxflags)
         
         renderCount += ntanks + nflags
 
