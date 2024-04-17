@@ -1,53 +1,104 @@
 import torch, os
 import numpy as np
 import torchvision as tv
+from utils import Converter
+from tqdm import tqdm
 
+anchor_boxes_yaml_location = './anchor_boxes.yaml'
 
 class RisikoDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_dir:str,
+    def __init__(self, dataset_dir:str, cv:Converter,
                  train_mode:bool=False,
-                 gauss_kernels:list = [ (3,3), (5,5), (1,3), (3,1), (1,5), (5,1) ],
-                 gauss_sigmas:list = [ (0.2, 5.), (0.1, 2.), (0.05, 4.) ],
-                 salt_pepper_hval:int = 20,
-                 rnd_keypoints_number:int = 10,
-                 max_agumenting_lines:int = 30
+                 gauss_kernels:tuple[tuple[int,int], ...] = ( (3,3), (5,5), (1,3), (3,1), (1,5), (5,1) ),
+                 gauss_sigmas:tuple[tuple[float,float], ...] = ( (0.1, 2.), (0.05, 2.75), (0.01, 3.5) ),
+                 salt_pepper_hval:int = 200,
+                 load_all_images_in_memory:bool = False,
                  ):
+        
+        self.train_mode:bool = train_mode
+        self.gauss_kernels:tuple[tuple[int,int], ...] = gauss_kernels
+        self.gauss_sigmas:tuple[tuple[float,float], ...] = gauss_sigmas
+        self.salt_pepper_hval:int = salt_pepper_hval
+        self.imgs_loaded:bool = load_all_images_in_memory
+        self.cv = cv
+
+        self.images:list[torch.Tensor] = []
+        self.images_shape:list[torch.Size] = []
+
+        self.basic_labels:list[torch.Tensor] = []
+        self.labels:list[torch.Tensor] = []
         
         imgs_dir = dataset_dir + "/images"
         labels_dir = dataset_dir + "/labels"
 
-        self.images = sorted( filter( lambda x: os.path.isfile(os.path.join(imgs_dir, x)), os.listdir(self.imgs_dir) ) )
-        self.labels = map(lambda x: os.path.join(labels_dir, os.path.splitext(os.path.basename(x))[0]) + ".txt", self.images)
+        self.img_paths = sorted( filter( lambda x: os.path.isfile(os.path.join(imgs_dir, x)), os.listdir(imgs_dir) ) )
 
-        for lbl in self.labels:
-            if not os.path.isfile(lbl):
-                print("Error: file \"" + lbl + "\" does not exists")
+        prog_bar = tqdm(total=len(self.img_paths))
+
+        for i in range(len(self.img_paths)):
+            self.img_paths[i] = os.path.join(imgs_dir, self.img_paths[i])
+
+            # load image to get shape
+            img = tv.io.read_image(self.img_paths[i], tv.io.ImageReadMode.RGB)
+
+            # set and check shape(only in train mode)
+            old_netin = self.cv.netin_img_shape
+            self.cv.set_img_original_shape(img.shape)
+            if self.train_mode and old_netin != self.cv.netin_img_shape and i > 0:
+                prog_bar.close()
+                print('Error all images must have the same netin_img_shape, but image ' + str(i) + ' has a different netin_img_shape compared to the previous image')
                 exit()
+
+            if self.imgs_loaded:
+                self.images.append(cv.apply_letterbox_to_image(img))
+            self.images_shape.append(img.shape)
+
+            # load all labels here and format them correctly to spare time during training
+            label_fname = os.path.join(labels_dir, os.path.splitext(os.path.basename(self.img_paths[i]))[0]) + '.txt'
+
+            if os.path.isfile(label_fname):
+                label_file_content = np.genfromtxt(fname= label_fname, delimiter=' ', dtype=np.float32)
+
+                if label_file_content.shape[0] > 0:
+
+                    if len(label_file_content.shape) == 1: # avoid errors (dimension errors with images containing only one object)
+                        self.basic_labels.append(torch.from_numpy(label_file_content).unsqueeze(0))
+                    else:
+                        self.basic_labels.append(torch.from_numpy(label_file_content))
+
+                    self.cv.apply_letterbox_to_labels(self.basic_labels[i])
+
+                else:
+                    self.basic_labels.append(None)
+            else:
+                self.basic_labels.append(None)
             
-        self.train_mode = train_mode
-        self.gauss_kernels = gauss_kernels
-        self.gauss_sigmas = gauss_sigmas
-        self.salt_pepper_hval = salt_pepper_hval
-        self.rnd_keypoints_number = rnd_keypoints_number
-        self.max_agumenting_lines = max_agumenting_lines
+            if self.train_mode:
+                self.labels.append(self.cv.convert_labels_to_netout(self.basic_labels[i], check_coordinate_overlap=True))
+            
+            prog_bar.update(1)
+        
+        prog_bar.close()
 
-
+                
     def __len__(self) -> int:
-        return len(self.images)
+        return len(self.img_paths)
     
     def __getitem__(self, idx:int, mode_plot:bool=False) -> tuple[torch.Tensor, torch.Tensor]:
-        annotations_file_data = np.genfromtxt(fname= self.annots_dir + "/" + self.annotations[idx], delimiter=' ', dtype=np.float32)
-        classes, bboxes = np.hsplit(annotations_file_data, np.array([1]))
 
-        basic_annotations = torch.cat([torch.from_numpy(bboxes), torch.from_numpy(classes)], 1)
-        img = tv.io.read_image(self.imgs_dir + "/" + self.images[idx], tv.io.ImageReadMode.RGB)
+        if self.imgs_loaded:
+            img = self.images[i]
+        else:
+            img = tv.io.read_image(self.img_paths[idx], tv.io.ImageReadMode.RGB)
+            self.cv.set_img_original_shape(img.shape)
+            img = self.cv.apply_letterbox_to_image(img)
 
         if mode_plot:
-            return img, basic_annotations
+            return img, self.basic_labels[idx]
 
         # agumentation step
         if self.train_mode:
-            agumentation_modes_array = np.arange(3, dtype=int)
+            agumentation_modes_array = np.arange(2, dtype=int)
             agumentation_modes_array = np.random.permutation(agumentation_modes_array) # allows for effect to apply on top of one another in a random way
 
             for i in agumentation_modes_array:
@@ -55,30 +106,27 @@ class RisikoDataset(torch.utils.data.Dataset):
                     if i == 0: # gaussian blur
                         gauss_kernel = self.gauss_kernels[np.random.randint(len(self.gauss_kernels))]
                         gauss_sigma = self.gauss_sigmas[np.random.randint(len(self.gauss_sigmas))]
-                        img = tv.transforms.GaussianBlur(gauss_kernel, gauss_sigma)
+                        gauss_transform = tv.transforms.GaussianBlur(gauss_kernel, gauss_sigma)
+                        img = gauss_transform(img)
+
                     elif i == 1: # salt and pepper
                         #generate random tensor, threshold it and apply to some pixel a randomly generated color
                         rnd_tensor = torch.randint_like(input=img, low=0, high=self.salt_pepper_hval+1)
-                        mask = rnd_tensor < self.salt_pepper_hval
+                        mask = rnd_tensor == self.salt_pepper_hval
                         rnd_tensor = torch.randint_like(input=img, low=0, high=255)
                         img[mask] = rnd_tensor[mask]
-                    elif i == 2: # random geometric shapes of random color
-                        rnd_color = torch.randint(low=0, high=255, size=3, dtype=img.dtype)
-
-                        # random points
-                        rnd_keypoints = torch.zeros(size=(self.rnd_keypoints_number, 2), dtype=torch.int)
-                        rnd_keypoints[0:] = torch.randint(low=0, high=img.size(2), dtype=rnd_keypoints.dtype, size=self.rnd_keypoints_number) # X width
-                        rnd_keypoints[1:] = torch.randint(low=0, high=img.size(1), dtype=rnd_keypoints.dtype, size=self.rnd_keypoints_number) # Y height
-
-                        # connect points at random
-                        connections_count = torch.randint(low=0,high=self.max_agumenting_lines, dtype=torch.int)
-                        rnd_connections = torch.randint(low=0, high=self.rnd_keypoints_number, size=(connections_count, 2), dtype=torch.int)
-                        img = tv.utils.draw_keypoints(img, keypoints=rnd_keypoints, connectivity=rnd_connections, colors=rnd_color, radius=1, width=1)
 
         # normalize image from 0 to 1
         #img = img.to(torch.float16) / 256
 
-        annotations = torch.ones([300,5], dtype=torch.float32) * -1
-        annotations[:basic_annotations.size()[0], ...] = basic_annotations
+        return img, self.labels[idx]
+    
 
-        return img, annotations
+    def get_img_shape(self, index:int) -> torch.Size:
+            
+        if self.imgs_loaded:
+            img_shape = self.images[index].shape
+        else:
+            img_shape = tv.io.read_image(self.img_paths[index], tv.io.ImageReadMode.RGB).size()
+
+        return img_shape

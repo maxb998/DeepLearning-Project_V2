@@ -1,180 +1,240 @@
-import torch
-from collections import Counter
+import torch, yaml, math
+import torchvision as tv
+from sys import exit
 
-def intersection_over_union(boxes_preds, boxes_labels):
-    """
-    Calculates intersection over union
+class Converter:
+    big_grid_res = 4
 
-    Parameters:
-        boxes_preds (tensor): Predictions of Bounding Boxes (BATCH_SIZE, 4)
-        boxes_labels (tensor): Correct labels of Bounding Boxes (BATCH_SIZE, 4)
+    original_img_shape:torch.Size
+    img_upscale_coeff:float # multiplier applied to image to scale to netin_img_shape
+    netin_img_shape:int # size of the image input of the net (no downscaling)
+    grids_count:int # number of grids of anchors applied on top of the image for detection
+    grids_shape:torch.Tensor    # number of cell each row/colums(equals since shape is square) of each grid
+    grids_relative_area:torch.Tensor # size in pixels of grids cell for all grids
+    abox_count:int  # number of anchor boxes used
+    abox_default_scale_ratio:torch.Tensor # tensor of size [2, abox_count] containing reference(default) values for scale and ratio of each anchor box
+    netout_dtype:torch.dtype
 
-    Returns:
-        tensor: Intersection over union for all examples
-    """
+    # both of these consider an netin_img_shape of at most 5120 (no need to go above) which are 8 grids
+    max_netin:int=5120
+    max_grids:int
+    netout_grid_limits:torch.Tensor # tensor containing the number of the limiting row of each grid in netout
+    netout_center_multiplier:torch.Tensor
+    netout_center_offset:torch.Tensor
+    netout_abox_multiplier:torch.Tensor # tensor used to multiply netout anchor boxes to convert their values into pixels values (except for ratio)
+    netout_abox_offsets:torch.Tensor # tensor containg the value of the offset to make each center match the cell location on the grid
 
-    box1_x1 = boxes_preds[..., 0:1] - boxes_preds[..., 2:3] / 2
-    box1_y1 = boxes_preds[..., 1:2] - boxes_preds[..., 3:4] / 2
-    box1_x2 = boxes_preds[..., 0:1] + boxes_preds[..., 2:3] / 2
-    box1_y2 = boxes_preds[..., 1:2] + boxes_preds[..., 3:4] / 2
-    box2_x1 = boxes_labels[..., 0:1] - boxes_labels[..., 2:3] / 2
-    box2_y1 = boxes_labels[..., 1:2] - boxes_labels[..., 3:4] / 2
-    box2_x2 = boxes_labels[..., 0:1] + boxes_labels[..., 2:3] / 2
-    box2_y2 = boxes_labels[..., 1:2] + boxes_labels[..., 3:4] / 2
+    def __init__(self, netout_dtype:torch.dtype=torch.float32, abox_def_file_path:str='./anchor_boxes.yaml') -> None:
 
-    x1 = torch.max(box1_x1, box2_x1)
-    y1 = torch.max(box1_y1, box2_y1)
-    x2 = torch.min(box1_x2, box2_x2)
-    y2 = torch.min(box1_y2, box2_y2)
+        assert (
+            netout_dtype == torch.float16 or
+            netout_dtype == torch.float32
+        )
+        self.netout_dtype = netout_dtype
 
-    # .clamp(0) is for the case when they do not intersect
-    intersection = (x2 - x1).clamp(0) * (y2 - y1).clamp(0)
+        # read anchor box file
+        with open(abox_def_file_path) as f:
+            anchor_dict = yaml.load(f, Loader=yaml.FullLoader)
 
-    box1_area = abs((box1_x2 - box1_x1) * (box1_y2 - box1_y1))
-    box2_area = abs((box2_x2 - box2_x1) * (box2_y2 - box2_y1))
+        self.abox_count = len(anchor_dict)
+        self.abox_default_scale_ratio = torch.zeros(size=[self.abox_count, 2], dtype=torch.float32)
+        for i in range(self.abox_count):
+            self.abox_default_scale_ratio[i,1] = anchor_dict[i]['ratio']
+            self.abox_default_scale_ratio[i,0] = 1 / self.abox_default_scale_ratio[i,1].sqrt() # keeps the area of the default anchor the same value as the grid_cell_area
 
-    return intersection / (box1_area + box2_area - intersection + 1e-6)
+        self.netin_img_shape = -1 # to work with init function
 
+        # setup here using self.max_netin
+        self.max_grids:int=round(math.log2(self.max_netin / self.big_grid_res) - 3) + 1
+        self.grids_shape = torch.round(torch.pow(2, torch.arange(self.max_grids)) * self.big_grid_res).type(torch.int32)
+        self.grids_relative_area = torch.divide(1., self.grids_shape.square())
 
-def non_max_iou_suppression(bboxes, iou_threshold):
-    """
-    Does Non Max IoU Suppression given bboxes
-
-    Parameters:
-        bboxes (list): list of lists containing all bboxes with each bboxes
-        specified as [class_pred, prob_score, x1, y1, x2, y2]
-        iou_threshold (float): threshold where predicted bboxes is correct
-
-    Returns:
-        list: bboxes after performing NMS given a specific IoU threshold
-    """
-
-
-    bboxes = sorted(bboxes, key=lambda x: x[1], reverse=True)
-    bboxes_after_nms = []
-
-    while bboxes:
-        chosen_box = bboxes.pop(0)
-
-
-        bboxes = [
-            box for box in bboxes
-            if box[0] != chosen_box[0] or intersection_over_union( torch.tensor(chosen_box[2:]), torch.tensor(box[2:])) < iou_threshold
-        ]
-
-        bboxes_after_nms.append(chosen_box)
-
-    return bboxes_after_nms
-
-
-def mean_average_precision(pred_boxes, true_boxes, iou_threshold=0.5, num_classes=12) -> float:
-    """
-    Calculates mean average precision 
-
-    Parameters:
-        pred_boxes (list): list of lists containing all bboxes with each bboxes
-        specified as [train_idx, class_prediction, prob_score, x1, y1, x2, y2]
-        true_boxes (list): Similar as pred_boxes except all the correct ones 
-        iou_threshold (float): threshold where predicted bboxes is correct
-        box_format (str): "midpoint" or "corners" used to specify bboxes
-        num_classes (int): number of classes
-
-    Returns:
-        float: mAP value across all classes given a specific IoU threshold 
-    """
-
-    # list storing all AP for respective classes
-    average_precisions = []
-
-    # used for numerical stability later on
-    epsilon = 1e-6
-
-    for c in range(num_classes):
-        detections = []
-        ground_truths = []
-
-        # Go through all predictions and targets,
-        # and only add the ones that belong to the
-        # current class c
-        for detection in pred_boxes:
-            if detection[1] == c:
-                detections.append(detection)
-
-        for true_box in true_boxes:
-            if true_box[1] == c:
-                ground_truths.append(true_box)
-
-        # find the amount of bboxes for each training example
-        # Counter here finds how many ground truth bboxes we get
-        # for each training example, so let's say img 0 has 3,
-        # img 1 has 5 then we will obtain a dictionary with:
-        # amount_bboxes = {0:3, 1:5}
-        amount_bboxes = Counter([gt[0] for gt in ground_truths])
-
-        # We then go through each key, val in this dictionary
-        # and convert to the following (w.r.t same example):
-        # ammount_bboxes = {0:torch.tensor[0,0,0], 1:torch.tensor[0,0,0,0,0]}
-        for key, val in amount_bboxes.items():
-            amount_bboxes[key] = torch.zeros(val)
-
-        # sort by box probabilities which is index 2
-        detections.sort(key=lambda x: x[2], reverse=True)
-        TP = torch.zeros((len(detections)))
-        FP = torch.zeros((len(detections)))
-        total_true_bboxes = len(ground_truths)
+        # setup netout related data(computationally more expensive so only do once)
+        max_grids_cells_count = self.grids_shape.square()
+        self.netout_grid_limits = torch.zeros(self.max_grids+1, dtype=torch.int32)
+        for i in range(self.max_grids):
+            self.netout_grid_limits[i+1] = self.netout_grid_limits[i] + max_grids_cells_count[i]
         
-        # If none exists for this class then we can safely skip
-        if total_true_bboxes == 0:
-            continue
+        mem_format = torch.contiguous_format
+        self.netout_center_offset = torch.empty(size=(self.netout_grid_limits[-1],2), dtype=netout_dtype, memory_format=mem_format)
+        self.netout_center_multiplier = torch.empty(size=(self.netout_grid_limits[-1],2), dtype=netout_dtype, memory_format=mem_format)
+        self.netout_abox_offset = torch.empty(size=(self.netout_grid_limits[-1],self.abox_count,2), dtype=netout_dtype, memory_format=mem_format)
+        self.netout_abox_multiplier = torch.empty(size=(self.netout_grid_limits[-1],self.abox_count,2), dtype=netout_dtype, memory_format=mem_format)
+        for i in range(self.max_grids):
+            l1, l2 = self.netout_grid_limits[i], self.netout_grid_limits[i+1] # to make the code more readable
 
-        for detection_idx, detection in enumerate(detections):
-            # Only take out the ground_truths that have the same
-            # training idx as detection
-            ground_truth_img = [
-                bbox for bbox in ground_truths if bbox[0] == detection[0]
-            ]
+            # set multiplier tensor
+            self.netout_center_multiplier[l1:l2,:] = 1. / self.grids_shape[i].type(torch.float32)
+            self.netout_abox_multiplier[l1:l2,:,0] = 2. / self.grids_shape[i].type(torch.float32)
+            self.netout_abox_multiplier[l1:l2,:,1] = 1 # ratio does not scale with grid size
 
-            num_gts = len(ground_truth_img)
-            best_iou = 0
-
-            for idx, gt in enumerate(ground_truth_img):
-                iou = intersection_over_union(torch.tensor(detection[3:]), torch.tensor(gt[3:]))
-
-                if iou > best_iou:
-                    best_iou = iou
-                    best_gt_idx = idx
-
-            if best_iou > iou_threshold:
-                # only detect ground truth detection once
-                if amount_bboxes[detection[0]][best_gt_idx] == 0:
-                    # true positive and add this bounding box to seen
-                    TP[detection_idx] = 1
-                    amount_bboxes[detection[0]][best_gt_idx] = 1
-                else:
-                    FP[detection_idx] = 1
-
-            # if IOU is lower then the detection is a false positive
-            else:
-                FP[detection_idx] = 1
-
-        TP_cumsum = torch.cumsum(TP, dim=0)
-        FP_cumsum = torch.cumsum(FP, dim=0)
-        recalls = TP_cumsum / (total_true_bboxes + epsilon)
-        precisions = torch.divide(TP_cumsum, (TP_cumsum + FP_cumsum + epsilon))
-        precisions = torch.cat((torch.tensor([1]), precisions))
-        recalls = torch.cat((torch.tensor([0]), recalls))
-        # torch.trapz for numerical integration
-        average_precisions.append(torch.trapz(precisions, recalls))
-
-    return sum(average_precisions) / len(average_precisions)
+            # set offset tensor
+            aranged_tensor = torch.arange(start=self.netout_center_multiplier[l1, 0]/2, end=1, step=self.netout_center_multiplier[l1, 0], dtype=netout_dtype)
+            self.netout_center_offset[l1:l2,0] = aranged_tensor.repeat(self.grids_shape[i])
+            self.netout_center_offset[l1:l2,1] = aranged_tensor.repeat_interleave(self.grids_shape[i])
+            self.netout_abox_offset[l1:l2,:,0] = self.abox_default_scale_ratio[:,0] * self.netout_abox_multiplier[l1,:,0] # scale offset
+            self.netout_abox_offset[l1:l2,:,1] = self.abox_default_scale_ratio[:,1] * self.netout_abox_multiplier[l1,:,1] # ratio offset
 
 
-def save_checkpoint(state, filename="my_checkpoint.pth.tar"):
-    print("=> Saving checkpoint")
-    torch.save(state, filename)
+    def set_img_original_shape(self, original_img_shape:torch.Size):
+
+        assert original_img_shape[1] <= self.max_netin and original_img_shape[2] <= self.max_netin
+
+        self.original_img_shape = original_img_shape
+        self.netin_img_shape = int(max(pow(2, math.ceil(math.log2(max(original_img_shape)/self.big_grid_res))) * self.big_grid_res, 160))
+        self.img_upscale_coeff = self.netin_img_shape / max(self.original_img_shape)
+        self.grids_count = round(math.log2(self.netin_img_shape / self.big_grid_res) - 3) + 1
 
 
-def load_checkpoint(checkpoint, model, optimizer):
-    print("=> Loading checkpoint")
-    model.load_state_dict(checkpoint["state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
+    # Given an input image resizes it to match netin shape, without stretching the image(apply letterbox effect)
+    def apply_letterbox_to_image(self, img:torch.Tensor) -> torch.Tensor:
+
+        if img.shape != self.original_img_shape:
+            self.set_img_original_shape(img.shape)
+
+        if not (img.shape[1] == self.netin_img_shape and img.shape[2] == self.netin_img_shape):
+
+            letterboxed_img = torch.ones(size=[3,self.netin_img_shape,self.netin_img_shape], dtype=img.dtype)
+            rnd_color = torch.randint(low=0, high=255, size=3, dtype=img.dtype)
+            torch.multiply(input=letterboxed_img, other=rnd_color, out=letterboxed_img)
+
+            if self.img_upscale_coeff != 1:
+                # Upscale image if necessary
+                upscaler = tv.transforms.Compose(tv.transforms.Resize(size=img.shape * self.img_upscale_coeff))
+                img = upscaler(img)
+
+            start_pt = torch.empty(size=2, dtype=int)
+            torch.floor(((img.shape[1:3] - self.netin_img_shape) / 2), out=start_pt)
+            letterboxed_img[:, start_pt[0]:start_pt[0]+self.netin_img_shape, start_pt[1]:start_pt[1]+self.netin_img_shape] = img
+        
+            return letterboxed_img
+        
+        else:
+            return img.clone()
+    
+    # Re-fit bounding boxes to letterbox scaled image
+    def apply_letterbox_to_labels(self, labels:torch.Tensor):
+        if not (self.original_img_shape[1] == self.netin_img_shape and self.original_img_shape[2] == self.netin_img_shape):
+
+            upscale_coeff = self.netin_img_shape / max(self.original_img_shape)
+
+            if upscale_coeff != 1:
+                # scale boxes width and height
+                torch.multiply(labels[:,3:5], upscale_coeff, out=labels[:,3:5])
+            if self.original_img_shape[0] == self.original_img_shape[1]:
+                # offset centers
+                boxes_offset = labels[:,1:3] * (self.netin_img_shape - self.original_img_shape[1:][::-1]) / 2
+                torch.add(labels[:,1:3], boxes_offset, out=labels[:,1:3])
+    
+
+
+    # Converts the labels values to be absolute in pixel instead of being relative to image width and height
+    def convert_labels_from_relative_to_absolute_values(self, labels:torch.Tensor, use_netin_shape:bool=False):
+        if use_netin_shape:
+            torch.multiply(labels[:,1:], self.netin_img_shape, out=labels[:,1:])
+        else:
+            torch.multiply(labels[:,1], self.original_img_shape[2], out=labels[:,1])
+            torch.multiply(labels[:,3], self.original_img_shape[2], out=labels[:,3])
+            torch.multiply(labels[:,2], self.original_img_shape[1], out=labels[:,2])
+            torch.multiply(labels[:,4], self.original_img_shape[1], out=labels[:,4])
+        
+        torch.round(labels[:,3:], out=labels[:,3:]) # numerical stability
+
+
+    # Convert labels(with values relative to image size(between 0 and 1)) to network output shape
+    def convert_labels_to_netout(self, labels:torch.Tensor, check_coordinate_overlap:bool=False) -> torch.Tensor:
+
+        netout = torch.zeros((self.netout_grid_limits[self.grids_count+1], 8), dtype=self.netout_dtype)
+
+        if labels == None:
+            return netout
+        if len(labels.shape) == 1:
+            labels = labels.unsqueeze(0)
+
+        #labels = labels.clone() # preserve labels
+
+        boxes_relative_area = labels[:,3] * labels[:,4]
+        boxes_ratio = labels[:,3] / labels[:,4]
+
+        chosen_grids_idxs = torch.abs(boxes_relative_area.repeat((self.grids_relative_area.shape[0],1)).t() - self.grids_relative_area).argmin(-1)
+        chosen_grids_shape = self.grids_shape[chosen_grids_idxs]
+
+        chosen_abox_idxs = torch.abs(boxes_ratio.repeat((self.abox_count,1)).t() - self.abox_default_scale_ratio[:,1]).argmin(-1)
+
+        grid_x = torch.multiply(labels[:,1], chosen_grids_shape).floor()
+        grid_y = torch.multiply(labels[:,2], chosen_grids_shape).floor()
+        torch.multiply(grid_y, chosen_grids_shape, out=grid_y)
+        netout_coords = torch.add(grid_x, grid_y).type(torch.int32)
+        torch.add(netout_coords, self.netout_grid_limits[chosen_grids_idxs], out=netout_coords)
+
+        for i in range(labels.shape[0]):
+            coord = netout_coords[i]
+            abox_idx = chosen_abox_idxs[i]
+
+            if check_coordinate_overlap:
+                if coord in netout_coords[:i]:
+                    print('There is already a object at the selected coordinate[' + str(i) + '] of ' + str(netout_coords[i]))
+                    print('Coords already occupied ' + str(netout_coords))
+                    exit()
+            
+            netout[coord, 0] = 1
+            netout[coord, 1] = int(torch.floor(labels[i,0] / 6)) # 0 for tank, 1 for flag
+            netout[coord, 2] = labels[i,0] % 6 # color class
+            netout[coord, 3:5] = (labels[i,1:3] - self.netout_center_offset[coord]) / self.netout_center_multiplier[coord] # center
+            netout[coord, 5] = abox_idx # anchor box identifier
+            netout[coord, 6] = (labels[i,3] - self.netout_abox_offset[coord, abox_idx , 0]) / self.netout_abox_multiplier[coord, abox_idx, 0] # scale
+            netout[coord, 7] = (boxes_ratio[i] - self.netout_abox_offset[coord, abox_idx, 1]) / self.netout_abox_multiplier[coord, abox_idx, 1] #ratio
+
+        return netout
+
+    def fit_netout(self, netout:torch.Tensor, preserve_original:bool=False):
+
+        assert netout.shape[-1] == 8
+
+        if preserve_original:
+            netout = netout.clone()
+
+        torch.multiply(netout[..., 3:5], self.netout_center_multiplier[:netout.shape[-2]], out=netout[..., 3:5])
+        torch.add(netout[..., 3:5], self.netout_center_offset[:netout.shape[-2]], out=netout[..., 3:5])
+
+        aboxes_idx = netout[:,5].type(torch.int32)
+        aranged_tensor = torch.arange(netout.shape[-2], dtype=torch.int32)
+        torch.multiply(netout[..., 6:8], self.netout_abox_multiplier[:netout.shape[-2]][aranged_tensor, aboxes_idx], out=netout[..., 6:8])
+        torch.add(netout[..., 6:8], self.netout_abox_offset[:netout.shape[-2]][aranged_tensor, aboxes_idx], out=netout[..., 6:8])
+
+        return netout
+
+    def convert_netout_to_labels(self, netout:torch.Tensor, probability_threshold:float=0.6, max_iou:float=0.6, apply_nms:bool=True) -> torch.Tensor:
+
+        assert len(netout.shape) == 2 # cannot do all batch at once since every image has a different number of boxes
+        assert netout.shape == (self.netout_grid_limits[self.grids_count+1], 8)
+
+        thresholded_netout = netout[netout[:, 0] > probability_threshold]
+
+        torch.add(thresholded_netout[:, 2], ( 6 * thresholded_netout[:, 1].round()), out=thresholded_netout[:, 1])
+
+        # choose anchor box for each thresholded detection
+        # thresholded_best_aboxes_idx = thresholded_netout[:, 5].type(torch.int32)
+
+        aranged_tensor = torch.arange(thresholded_netout.shape[0], dtype=torch.int32)
+        #thresholded_netout[:, 6] = thresholded_netout[aranged_tensor, 3 + thresholded_best_aboxes_idx] # abox chance (don't know if it's even needed so it's at the end)
+        # torch.multiply(thresholded_best_aboxes_idx, 2, out=thresholded_best_aboxes_idx)
+        thresholded_netout[:, 2] = thresholded_netout[aranged_tensor, 3] #cx
+        thresholded_netout[:, 3] = thresholded_netout[aranged_tensor, 4] #cy
+        thresholded_netout[:, 4] = thresholded_netout[aranged_tensor, 6] #scale (after appling multiplier above this is the same as width)
+        thresholded_netout[:, 5] = thresholded_netout[aranged_tensor, 7] #ratio
+
+        # convert labels from [p,class,cx,cy,r,s] notation to nms_labels[x1,y1,x2,y2] (needed for nms) and labels[p, class, cx, cy, width, height] (needed as output)
+        labels = thresholded_netout[:, :6].clone()
+        torch.divide(labels[:,4], labels[:,5], out=labels[:,5]) # get height
+
+        if apply_nms:
+            nms_labels = labels[:,2:4].repeat((1,2))
+            torch.add(nms_labels, torch.cat((-labels[:,4:6], labels[:,4:6]), dim=1), out=nms_labels)
+
+            remaining_boxes = tv.ops.batched_nms(boxes=nms_labels, scores=labels[:,0], idxs=labels[:,1], iou_threshold=max_iou)
+
+            labels = labels[remaining_boxes]
+
+        return labels
+

@@ -1,4 +1,4 @@
-import os, cv2, colorsys, copy, argparse, time
+import os, cv2, colorsys, copy, argparse, time, math, torch
 import numpy as np
 import open3d as o3d
 from tqdm import tqdm
@@ -15,6 +15,33 @@ class Params:
     minObjSize:int
     renderRes:int
     maxOverlap:float
+    big_grid_res:int = 4
+    
+    netin_img_shape:int # size of the image input of the net (no downscaling)
+    grids_count:int # number of grids of anchors applied on top of the image for detection
+    grids_shape:torch.Tensor    # number of cell each row/colums(equals since shape is square) of each grid
+    grids_cell_size_px:torch.Tensor # size in pixels of grids cell for all grids
+    grids_cell_areas:torch.Tensor
+    netout_grid_limits:torch.Tensor # tensor containing the number of the limiting row of each grid in netout
+
+    def set_netin(self):
+        self.netin_img_shape = int(max(pow(2, math.ceil(math.log2(max(self.imgHeight, self.imgWidth)/self.big_grid_res))) * self.big_grid_res, 160))
+        self.grids_count = round(math.log2(self.netin_img_shape / self.big_grid_res) - 3) + 1
+        self.grids_shape = torch.round(torch.pow(2, torch.arange(self.grids_count)) * self.big_grid_res).type(torch.int32)
+        self.grids_cell_size_px = torch.divide(self.netin_img_shape, self.grids_shape[:self.grids_count]).round().type(torch.int32)
+        self.grids_cell_areas = torch.square(self.grids_cell_size_px * 2)
+
+        grids_cells_count = torch.square(self.grids_shape)
+        self.netout_grid_limits = torch.zeros(self.grids_count+1, dtype=torch.int32)
+        for i in range(self.grids_count):
+            self.netout_grid_limits[i+1] = self.netout_grid_limits[i] + grids_cells_count[i]
+
+        # print('netin_shape = ' + str(self.netin_img_shape))
+        # print('grids_count = ' + str(self.grids_count))
+        # print('grids_shape = ' + str(self.grids_shape))
+        # print('grids_cell_size_px = ' + str(self.grids_cell_size_px))
+        # print('grids_cell_areas = ' + str(self.grids_cell_areas))
+        # print('netout_grid_limits = ' + str(self.netout_grid_limits))
     
 
 # CONSTANTS
@@ -212,7 +239,23 @@ def cmp_box_intersection_w_areas(newbox:np.ndarray, oldboxes:np.ndarray, maxArea
     
     return True
 
-def add_single_element(p:Params, renderer:o3d.visualization.rendering.OffscreenRenderer, img:np.ndarray, obj_class:int, previous_elems:np.ndarray, iternum:int, box_size:int) -> bool:
+def is_cell_occupied(p:Params, newbox:torch.Tensor, coords_list:list[int]) -> bool:
+    # find best grid that fits the bbox size(in area)
+    bbox_area = (newbox[2] - newbox[0]) * (newbox[3] - newbox[1])
+    best_grid_id = torch.abs(bbox_area - p.grids_cell_areas).argmin()
+
+    # find the coordinates of the cell(upper right corner) that contains the center of the bbox
+    center = newbox[0:2] + (newbox[2:4] - newbox[0:2]) / 2
+    cell_coords = torch.divide(center, p.grids_cell_size_px[best_grid_id] * 2).floor().type(torch.int32)
+    coord = int(p.netout_grid_limits[best_grid_id] + p.grids_shape[best_grid_id] * cell_coords[1] + cell_coords[0]) # WARNING might need to invert cell_coordinates[0] with cell_coordinates[1]
+
+    if coord in coords_list:
+        return False
+    
+    coords_list.append(coord)
+    return True
+
+def add_single_element(p:Params, renderer:o3d.visualization.rendering.OffscreenRenderer, img:np.ndarray, obj_class:int, previous_elems:np.ndarray, coords_list:list[int], iternum:int, box_size:int) -> bool:
 
     modify_obj(renderer, obj_class)
     obj, mask = render_obj(renderer, box_size)
@@ -222,11 +265,11 @@ def add_single_element(p:Params, renderer:o3d.visualization.rendering.OffscreenR
     # decide position for the new object
     fails = 0
     while True:
-        newbox = np.random.uniform(size=2).astype(np.float64) * rnd_gen_offsets
-        newbox = np.hstack([newbox, newbox]).round().astype(np.int32)
+        newbox = np.random.uniform(size=2) * rnd_gen_offsets
+        newbox = np.hstack([newbox, newbox]).round()
         newbox[2] += mask.shape[1]
         newbox[3] += mask.shape[0]
-        if cmp_box_intersection_w_areas(newbox, previous_elems[:iternum,1:], p.maxOverlap) or iternum == 0:
+        if (is_cell_occupied(p, torch.from_numpy(newbox), coords_list) and cmp_box_intersection_w_areas(newbox, previous_elems[:iternum,1:], p.maxOverlap)) or iternum == 0:
             break
         fails += 1
         if fails >= 20:
@@ -244,19 +287,22 @@ def add_single_element(p:Params, renderer:o3d.visualization.rendering.OffscreenR
 
 def add_armies(p:Params, renderer:o3d.visualization.rendering.OffscreenRenderer, img:np.ndarray, boxes_coords:np.ndarray, ntanks:int, nflags:int, obj_size_px:int) -> bool:
     box_counter = 0
+    coords_list = []
 
     renderer.scene.show_geometry('tank', True)
     renderer.scene.show_geometry('flag', False)
     for i in range(ntanks):
-         if not add_single_element(p, renderer, img, np.random.randint(6), boxes_coords, box_counter, obj_size_px): return False
+         if not add_single_element(p, renderer, img, np.random.randint(6), boxes_coords, coords_list, box_counter, obj_size_px): return False
          box_counter += 1
     
     renderer.scene.show_geometry('tank', False)
     renderer.scene.show_geometry('flag', True)
     for i in range(nflags):
-        if not add_single_element(p, renderer, img, np.random.randint(6,12), boxes_coords, box_counter, obj_size_px): return False
+        if not add_single_element(p, renderer, img, np.random.randint(6,12), boxes_coords, coords_list, box_counter, obj_size_px): return False
         box_counter += 1
     
+    # print(coords_list)
+
     return True
 
 def print_boxes(img:np.ndarray, boxes:np.ndarray):
@@ -271,7 +317,7 @@ def print_boxes(img:np.ndarray, boxes:np.ndarray):
 
 def generate_dataset(p:Params):
     out_imgs_dir, out_lbls_dir = os.path.join(p.outDir, "images"), os.path.join(p.outDir, "labels")
-    scale_arr = np.array([p.imgWidth, p.imgHeight, p.imgWidth, p.imgHeight], dtype=np.float64)
+    scale_arr = np.array([p.imgWidth, p.imgHeight, p.imgWidth, p.imgHeight], dtype=np.float32)
 
     backgrounds = [os.path.join(dp, f) for dp, dn, filenames in os.walk(p.backgroundsDir) for f in filenames if os.path.splitext(f)[1] in [".jpg", ".JPG"]]
 
@@ -307,10 +353,11 @@ def generate_dataset(p:Params):
             filenum_str = str(i).zfill(8)
             cv2.imwrite(os.path.join(out_imgs_dir, filenum_str + ".jpg"), img)
 
-            boxes = boxes.astype(np.float64)
-            boxes[:, 3:] -= boxes[:, 1:3]
-            boxes[:, 1:3] += (boxes[:, 3:] / 2)
-            boxes[:, 1:] /= scale_arr
+            np.subtract(boxes[:,3:], boxes[:,1:3], out=boxes[:,3:])
+            boxes = boxes.astype(np.float32)
+            np.add(boxes[:, 1:3], np.divide(boxes[:, 3:], 2), out=boxes[:, 1:3])
+            np.divide(boxes[:,1:], scale_arr, out=boxes[:,1:])
+
             with open(os.path.join(out_lbls_dir, filenum_str + ".txt"), "w") as f:
                 for j in range(boxes.shape[0]):
                     f.write(str(int(boxes[j,0])) + " " + str(boxes[j,1]) + " " + str(boxes[j,2]) + " " + str(boxes[j,3]) + " " + str(boxes[j,4]) + "\n")
@@ -329,6 +376,7 @@ def generate_dataset(p:Params):
 
 def main():
     p = argParser()
+    p.set_netin()
 
     np.random.seed(int(time.time()))
 

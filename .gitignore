@@ -13,4 +13,6 @@ Datasets/Generated_Dataset/train
 Datasets/Generated_Dataset/test
 Datasets/Generated_Dataset/val
 *.pdf
+debugger.ipynb
+
 
