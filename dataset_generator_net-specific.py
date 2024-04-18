@@ -91,7 +91,7 @@ def argParser() -> Params:
     parser.add_argument('-B', '--backgroundsDir', metavar='BACKGROUNDS_DIR', type=str, required=True, help='Directory containing some images to use as backgrounds')
     parser.add_argument('-N', '--nimgs', metavar='GENERATED_IMAGES_NUMBER', type=restricted_int, required=True, help='number of images to generate')
     parser.add_argument('--maxobjs', metavar='[N_TANKS,N_FLAGS]', type=restricted_int, nargs=2, default=[80,80], help='Max number of tanks follwed by max number of flags generated in each image')
-    parser.add_argument('--imgShape', metavar='[IMG_WIDTH,IMG_HEIGHT]', type=restricted_int, nargs=2, default=[640,640], help='Output images shape in pixels')
+    parser.add_argument('--imgShape', metavar='[IMG_WIDTH,IMG_HEIGHT]', type=restricted_int, nargs=2, default=[512,512], help='Output images shape in pixels')
     parser.add_argument('--objSizeLimits', metavar='[MAX_OBJ_SIZE,MIN_OBJ_SIZE]', type=restricted_int, nargs=2, default=[250,20], help='Limits in size of tank and flag resize after render in pixels(not exactly the max and min size)')
     parser.add_argument('--renderRes', metavar='RENDER_RES', type=restricted_int, help='Output images height in pixels (default is maxObjSize). If set lower than maxObjSize than rendered objects might be upscaled')
     parser.add_argument('--maxOverlap', metavar='MAX_OVERLAP', type=float, default=0.5, help='The maximum amount an object can be overlapped by another. Value range: (0,1)')
@@ -358,9 +358,9 @@ def generate_dataset(p:Params):
             np.add(boxes[:, 1:3], np.divide(boxes[:, 3:], 2), out=boxes[:, 1:3])
             np.divide(boxes[:,1:], scale_arr, out=boxes[:,1:])
 
-            with open(os.path.join(out_lbls_dir, filenum_str + ".txt"), "w") as f:
+            with open(os.path.join(out_lbls_dir, filenum_str + '.csv'), 'w') as f:
                 for j in range(boxes.shape[0]):
-                    f.write(str(int(boxes[j,0])) + " " + str(boxes[j,1]) + " " + str(boxes[j,2]) + " " + str(boxes[j,3]) + " " + str(boxes[j,4]) + "\n")
+                    f.write(str(int(boxes[j,0])) + ' ' + str(boxes[j,1]) + ' '  + str(boxes[j,2]) + ' ' + str(boxes[j,3]) + ' ' + str(boxes[j,4]) + '\n')
 
             pbar.update(1)
             i += 1

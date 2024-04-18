@@ -28,8 +28,8 @@ class RisikoDataset(torch.utils.data.Dataset):
         self.basic_labels:list[torch.Tensor] = []
         self.labels:list[torch.Tensor] = []
         
-        imgs_dir = dataset_dir + "/images"
-        labels_dir = dataset_dir + "/labels"
+        imgs_dir = os.path.join(dataset_dir, 'images')
+        labels_dir = os.path.join(dataset_dir, 'labels')
 
         self.img_paths = sorted( filter( lambda x: os.path.isfile(os.path.join(imgs_dir, x)), os.listdir(imgs_dir) ) )
 
@@ -57,7 +57,7 @@ class RisikoDataset(torch.utils.data.Dataset):
             label_fname = os.path.join(labels_dir, os.path.splitext(os.path.basename(self.img_paths[i]))[0]) + '.txt'
 
             if os.path.isfile(label_fname):
-                label_file_content = np.genfromtxt(fname= label_fname, delimiter=' ', dtype=np.float32)
+                label_file_content = np.genfromtxt(fname=label_fname, delimiter=' ', dtype=np.float32)
 
                 if label_file_content.shape[0] > 0:
 
