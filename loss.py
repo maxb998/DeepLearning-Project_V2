@@ -43,7 +43,7 @@ class RisikoLoss(nn.Module):
         self.aranged_tensor = torch.arange(batch_size * max_obj, dtype=torch.int32).to(self.device)
 
 
-    def forward(self, predictions:torch.Tensor, label:torch.Tensor):
+    def forward(self, predictions:torch.Tensor, label:torch.Tensor) -> torch.Tensor:
 
         targets_mask = label[...,0]==1
         predictions_targets = predictions[..., targets_mask, :]

@@ -22,8 +22,8 @@ class InceptionBlock(nn.Module):
         for i in range(len(kernels)):
             paddings.append(int(float(kernels[i])/2))
         
-        self.convs = []
-        self.convs_1d = []
+        self.convs = nn.ModuleList()
+        self.convs_1d = nn.ModuleList()
 
         for i in range(len(channels)):
             self.convs_1d.append(nn.Conv2d(in_channels=in_channels, out_channels=channels[i], kernel_size=1, stride=1, padding=0))
@@ -117,7 +117,7 @@ class DetektorNet(nn.Module):
             grids_output.insert(0,y)
 
             # exit condition
-            if x.shape[-1] == 64:
+            if x.shape[-1] <= 32:
                 break
 
             # dowscale image

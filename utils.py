@@ -144,7 +144,7 @@ class Converter:
     # Convert labels(with values relative to image size(between 0 and 1)) to network output shape
     def convert_labels_to_netout(self, labels:torch.Tensor, check_coordinate_overlap:bool=False) -> torch.Tensor:
 
-        netout = torch.zeros((self.netout_grid_limits[self.grids_count+1], 8), dtype=self.netout_dtype)
+        netout = torch.zeros((self.netout_grid_limits[self.grids_count], 8), dtype=self.netout_dtype)
 
         if labels == None:
             return netout
@@ -207,7 +207,9 @@ class Converter:
     def convert_netout_to_labels(self, netout:torch.Tensor, probability_threshold:float=0.6, max_iou:float=0.6, apply_nms:bool=True) -> torch.Tensor:
 
         assert len(netout.shape) == 2 # cannot do all batch at once since every image has a different number of boxes
-        assert netout.shape == (self.netout_grid_limits[self.grids_count+1], 8)
+        assert netout.shape == (self.netout_grid_limits[self.grids_count], 1+1+6+2+self.abox_count*(1+2))
+
+        netout = netout.detach()
 
         thresholded_netout = netout[netout[:, 0] > probability_threshold]
 

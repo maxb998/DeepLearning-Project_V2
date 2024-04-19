@@ -54,7 +54,7 @@ class RisikoDataset(torch.utils.data.Dataset):
             self.images_shape.append(img.shape)
 
             # load all labels here and format them correctly to spare time during training
-            label_fname = os.path.join(labels_dir, os.path.splitext(os.path.basename(self.img_paths[i]))[0]) + '.txt'
+            label_fname = os.path.join(labels_dir, os.path.splitext(os.path.basename(self.img_paths[i]))[0]) + '.csv'
 
             if os.path.isfile(label_fname):
                 label_file_content = np.genfromtxt(fname=label_fname, delimiter=' ', dtype=np.float32)
@@ -84,17 +84,14 @@ class RisikoDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.img_paths)
     
-    def __getitem__(self, idx:int, mode_plot:bool=False) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx:int, return_basic_labels:bool=False) -> tuple[torch.Tensor, torch.Tensor]:
 
         if self.imgs_loaded:
-            img = self.images[i]
+            img = self.images[idx]
         else:
             img = tv.io.read_image(self.img_paths[idx], tv.io.ImageReadMode.RGB)
             self.cv.set_img_original_shape(img.shape)
             img = self.cv.apply_letterbox_to_image(img)
-
-        if mode_plot:
-            return img, self.basic_labels[idx]
 
         # agumentation step
         if self.train_mode:
@@ -116,10 +113,13 @@ class RisikoDataset(torch.utils.data.Dataset):
                         rnd_tensor = torch.randint_like(input=img, low=0, high=255)
                         img[mask] = rnd_tensor[mask]
 
-        # normalize image from 0 to 1
-        #img = img.to(torch.float16) / 256
+        # convert image type and normalize from 0 to 1
+        img = img.type(self.cv.netout_dtype) / 256
 
-        return img, self.labels[idx]
+        if return_basic_labels:
+            return img, self.basic_labels[idx]
+        else:
+            return img, self.labels[idx]
     
 
     def get_img_shape(self, index:int) -> torch.Size:
