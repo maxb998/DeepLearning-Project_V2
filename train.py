@@ -43,7 +43,7 @@ def argParser() -> TrainingParams:
     t.dataset_path = args.dataset_path
     t.weights_path = args.weights_path
     t.load_all_imgs = args.load_all_imgs
-    t.load_weights = not args.new_weights
+    t.load_weights = args.new_weights
 
     return t
 
@@ -51,6 +51,8 @@ def get_score(model:DetektorNet, dataset:RisikoDataset, mean_ap_obj:MeanAverageP
 
     preds, target = list(), list()
     mAP = 0
+    detections = 0
+    effective_objs = 0
 
     pbar = tqdm(len(dataset), desc='\t Evaluating mAP on validation set', unit='sample', leave=True)
     pbar.set_postfix_str('mAP = ' + str(mAP))
@@ -59,12 +61,15 @@ def get_score(model:DetektorNet, dataset:RisikoDataset, mean_ap_obj:MeanAverageP
         img_tensor, target_labels = dataset.__getitem__(i, return_basic_labels=True)
         img_tensor = img_tensor.unsqueeze(0)
         target_labels = target_labels.clone() # clone to prevent modifications on original
+        effective_objs += target_labels.shape[0]
 
         preds_i, target_i = dict(), dict()
 
         netout = model.forward(img_tensor.to(device)).to('cpu')
 
-        pred_labels = dataset.cv.convert_netout_to_labels(netout.squeeze(0), probability_threshold=prob_threshold, max_iou=iou_threshold, apply_nms=True)
+        pred_labels = dataset.cv.convert_netout_to_basic_labels(netout.squeeze(0), probability_threshold=prob_threshold, max_iou=iou_threshold, apply_nms=True)
+        dataset.cv.convert_labels_from_relative_to_absolute_values(pred_labels, True)
+        detections += pred_labels.shape[0]
 
         # get labels absolute values
         target_i['boxes'] = target_labels[:,1:] * dataset.cv.netin_img_shape
@@ -79,7 +84,7 @@ def get_score(model:DetektorNet, dataset:RisikoDataset, mean_ap_obj:MeanAverageP
 
         mAP += mean_ap_obj.forward([preds_i], [target_i])['map']
 
-        pbar.set_postfix_str('mAP = ' + str(mAP.item() / (i+1)))
+        pbar.set_postfix(mAP=mAP.item()/(i+1), avg_detect=detections/(i+1), avg_objs=effective_objs/(i+1))
         pbar.update(1)
 
     return mAP.item()
@@ -94,8 +99,7 @@ def main():
     trainset = RisikoDataset(dataset_dir=os.path.join(p.dataset_path, 'train'), cv=cv, train_mode=True, load_all_images_in_memory=p.load_all_imgs)
     print('Loading validation set...')
     validationset = RisikoDataset(dataset_dir=os.path.join(p.dataset_path, 'val'), cv=cv, train_mode=False, load_all_images_in_memory=p.load_all_imgs)
-    print('Loading test set...')
-    testset = RisikoDataset(dataset_dir=os.path.join(p.dataset_path, 'test'), cv=cv, train_mode=False, load_all_images_in_memory=p.load_all_imgs)
+    # print('Loading test set...')
     print()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -103,7 +107,7 @@ def main():
     model = DetektorNet(cv.abox_count).to(device)
     loss_func = RisikoLoss(lambda_abox=0.1,
                       lambda_coord=1.,
-                      lambda_no_obj=0.01,
+                      lambda_no_obj=0.4,
                       lambda_class_obj=1,
                       lambda_class_color=0.1,
                       abox_count=cv.abox_count,
@@ -111,13 +115,15 @@ def main():
     
     # load existing weights if any
     if p.load_weights:
-        weights_fnames = os.listdir(p.weights_path).sort()
+        weights_fnames = os.listdir(p.weights_path)
         for w_name in weights_fnames:
-            if 'last' in w_name:
+            if 'last_model' == w_name:
+                print('loading previous weights')
                 model = torch.load(os.path.join(p.weights_path, w_name)).to(device)
     
 
-    optimizer = torch.optim.Adam(model.parameters(), weight_decay=0)
+    adam = torch.optim.Adam(model.parameters(), weight_decay=0.0001, lr=p.lr)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=adam, gamma=0.992)
     mean_ap_obj = MeanAveragePrecision(box_format='cxcywh', iou_type='bbox')
     mean_ap_obj.warn_on_many_detections = False
 
@@ -127,7 +133,7 @@ def main():
     loss_sum = int(0)
 
     for epoch in range(p.epochs):
-        pbar = tqdm(train_loader, desc='Training Epoch ' + str(epoch), unit='batch', leave=True)
+        pbar = tqdm(train_loader, desc='Epoch ' + str(epoch), unit='batch', leave=True)
         pbar.set_postfix(loss=loss_sum/p.batch)
 
         model.train()
@@ -135,24 +141,24 @@ def main():
         loss_sum = int(0)
         for batch_idx, (x,y) in enumerate(pbar):
 
-            optimizer.zero_grad()
+            adam.zero_grad()
 
             netout = model.forward(x.to(device)).to('cpu')
 
             loss = loss_func.forward(netout, y)
-            loss_sum += loss.item()
+            loss_sum += loss.item() / p.batch
             loss.backward()
 
-            optimizer.step()
+            adam.step()
 
-            pbar.set_postfix(loss=loss_sum/(batch_idx+1))
+            pbar.set_postfix(loss=loss_sum/(batch_idx+1), lr=scheduler.get_last_lr()[0].item())
 
         pbar.close()
+        scheduler.step()
 
         model.eval()
 
-        mAP = get_score(model=model, dataset=validationset, mean_ap_obj=mean_ap_obj, device=device, prob_threshold=0.5, iou_threshold=0.7)
-        print('Current mAP = ' + str(mAP))
+        mAP = get_score(model=model, dataset=validationset, mean_ap_obj=mean_ap_obj, device=device, prob_threshold=0.5, iou_threshold=0.5)
         if mAP > best_map:
             best_map = mAP
             torch.save(model, os.path.join(p.weights_path, 'best_model'))

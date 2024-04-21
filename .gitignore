@@ -12,7 +12,11 @@ Datasets/Generated_Dataset/labels/
 Datasets/Generated_Dataset/train
 Datasets/Generated_Dataset/test
 Datasets/Generated_Dataset/val
+Datasets/Generated_Dataset_BIG/images/
+Datasets/Generated_Dataset_BIG/labels/
+Datasets/Generated_Dataset_BIG/train
+Datasets/Generated_Dataset_BIG/test
+Datasets/Generated_Dataset_BIG/val
 *.pdf
-debugger.ipynb
 
 

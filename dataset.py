@@ -75,6 +75,8 @@ class RisikoDataset(torch.utils.data.Dataset):
             
             if self.train_mode:
                 self.labels.append(self.cv.convert_labels_to_netout(self.basic_labels[i], check_coordinate_overlap=True))
+            if self.basic_labels[i] is not None:
+                cv.convert_labels_from_relative_to_absolute_values(self.basic_labels[i])
             
             prog_bar.update(1)
         

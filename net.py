@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class InceptionBlock(nn.Module):
-    convs:list[nn.Conv2d]
-    convs_1d:list[nn.Conv2d]
+    channels:tuple[int]
+    convs:nn.ModuleList
+    convs_1d:nn.ModuleList
     adjust_channels_conv:nn.Conv2d
 
     def __init__(self, 
@@ -18,6 +19,8 @@ class InceptionBlock(nn.Module):
         assert len(channels) == len(kernels)
         assert any( k % 2 == 1 for k in kernels )
 
+        self.channels = channels
+
         paddings = []
         for i in range(len(kernels)):
             paddings.append(int(float(kernels[i])/2))
@@ -27,7 +30,8 @@ class InceptionBlock(nn.Module):
 
         for i in range(len(channels)):
             self.convs_1d.append(nn.Conv2d(in_channels=in_channels, out_channels=channels[i], kernel_size=1, stride=1, padding=0))
-            self.convs.append(nn.Conv2d(in_channels=in_channels, out_channels=channels[i], kernel_size=kernels[i], stride=1, padding=paddings[i], bias=not batch_norm_after, groups=min(in_channels, channels[i])))
+            if channels[i] != 1:
+                self.convs.append(nn.Conv2d(in_channels=in_channels, out_channels=channels[i], kernel_size=kernels[i], stride=1, padding=paddings[i], bias=not batch_norm_after, groups=min(in_channels, channels[i])))
         
         self.adjust_channels_conv = nn.Conv2d(in_channels=sum(channels), out_channels=in_channels, kernel_size=1, stride=1, padding=0)
 
@@ -40,7 +44,8 @@ class InceptionBlock(nn.Module):
             convs_1d_out.append(self.convs_1d[i](x))
 
         for i in range(len(convs_1d_out)):
-            convs_out.append(self.convs[i](convs_1d_out[i]))
+            if self.channels[i] != 1:
+                convs_out.append(self.convs[i](convs_1d_out[i]))
 
         y = torch.cat(convs_out, dim=-3) # concatenate along channels
 
@@ -62,15 +67,23 @@ def get_GridNet(abox_count:int, channels:tuple[int, ...], inc_block_channels:tup
 
     return nn.Sequential(
         nn.Conv2d       (in_channels=3,             out_channels=channels[0],       kernel_size=4, stride=4),
+        nn.PReLU    (),
         InceptionBlock  (in_channels=channels[0],   channels=inc_block_channels[0], kernels=inc_block_kernels[0], batch_norm_after=True),
         nn.BatchNorm2d  (num_features=channels[0]),
+        nn.PReLU    (),
         nn.Conv2d       (in_channels=channels[0],   out_channels=channels[1],       kernel_size=2, stride=2, groups=channels[0]),
+        nn.PReLU    (),
         InceptionBlock  (in_channels=channels[1],   channels=inc_block_channels[1], kernels=inc_block_kernels[1], batch_norm_after=True),
         nn.BatchNorm2d  (num_features=channels[1]),
+        nn.PReLU    (),
         nn.Conv2d       (in_channels=channels[1],   out_channels=channels[2],       kernel_size=1),
-        InceptionBlock  (in_channels=channels[2],   channels=inc_block_channels[2], kernels=inc_block_kernels[2], batch_norm_after=True),
-        nn.BatchNorm2d  (num_features=channels[2]),
-        nn.Conv2d       (in_channels=channels[2],   out_channels=out_ch_count,      kernel_size=1)
+        nn.PReLU    (),
+        InceptionBlock  (in_channels=channels[2],   channels=inc_block_channels[2], kernels=inc_block_kernels[2], batch_norm_after=False),
+        nn.PReLU    (),
+        InceptionBlock  (in_channels=channels[3],   channels=inc_block_channels[3], kernels=inc_block_kernels[3], batch_norm_after=True),
+        nn.BatchNorm2d  (num_features=channels[3]),
+        nn.PReLU    (),
+        nn.Conv2d       (in_channels=channels[3],   out_channels=out_ch_count,      kernel_size=1)
     )
 
 
@@ -83,16 +96,18 @@ class DetektorNet(nn.Module):
     def __init__(self, abox_count:int, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        channels = ( 64, 128, 256 )
+        channels = ( 128, 256, 512, 512 )
         inc_block_channels = (
-            ( 64, 64, 64),
-            (128,128,128),
-            (256,256)
+            (channels[0],channels[0],channels[0]),
+            (channels[1],channels[1],channels[1]),
+            (channels[2],channels[2]),
+            (channels[3],)
         )
         inc_block_kernels = (
             (1,3,5),
             (1,3,5),
-            (3,5)
+            (3,5),
+            (3,)
         )
 
         self.abox_count = abox_count
@@ -107,7 +122,6 @@ class DetektorNet(nn.Module):
 
             # Network layers pass
             y = self.GridNet_module(x)
-            y = F.leaky_relu(y)
 
             # flatten output
             y = y.flatten(start_dim=-2, end_dim=-1)

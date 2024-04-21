@@ -272,7 +272,7 @@ def add_single_element(p:Params, renderer:o3d.visualization.rendering.OffscreenR
         if (is_cell_occupied(p, torch.from_numpy(newbox), coords_list) and cmp_box_intersection_w_areas(newbox, previous_elems[:iternum,1:], p.maxOverlap)) or iternum == 0:
             break
         fails += 1
-        if fails >= 20:
+        if fails >= 100:
             return False # signal to restart
     
     # put object into image and newbox into previous_elems array

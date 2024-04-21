@@ -47,7 +47,7 @@ class Converter:
         # setup here using self.max_netin
         self.max_grids:int=round(math.log2(self.max_netin / self.big_grid_res) - 3) + 1
         self.grids_shape = torch.round(torch.pow(2, torch.arange(self.max_grids)) * self.big_grid_res).type(torch.int32)
-        self.grids_relative_area = torch.divide(1., self.grids_shape.square())
+        self.grids_relative_area = torch.divide(4., self.grids_shape.square())
 
         # setup netout related data(computationally more expensive so only do once)
         max_grids_cells_count = self.grids_shape.square()
@@ -65,7 +65,7 @@ class Converter:
 
             # set multiplier tensor
             self.netout_center_multiplier[l1:l2,:] = 1. / self.grids_shape[i].type(torch.float32)
-            self.netout_abox_multiplier[l1:l2,:,0] = 2. / self.grids_shape[i].type(torch.float32)
+            self.netout_abox_multiplier[l1:l2,:,0] = 2. * math.sqrt(2) / self.grids_shape[i].type(torch.float32)
             self.netout_abox_multiplier[l1:l2,:,1] = 1 # ratio does not scale with grid size
 
             # set offset tensor
@@ -74,7 +74,10 @@ class Converter:
             self.netout_center_offset[l1:l2,1] = aranged_tensor.repeat_interleave(self.grids_shape[i])
             self.netout_abox_offset[l1:l2,:,0] = self.abox_default_scale_ratio[:,0] * self.netout_abox_multiplier[l1,:,0] # scale offset
             self.netout_abox_offset[l1:l2,:,1] = self.abox_default_scale_ratio[:,1] * self.netout_abox_multiplier[l1,:,1] # ratio offset
-
+        
+        # flatten to work best with multiplication
+        self.netout_abox_offset = self.netout_abox_offset.flatten(1,2)
+        self.netout_abox_multiplier = self.netout_abox_multiplier.flatten(1,2)
 
     def set_img_original_shape(self, original_img_shape:torch.Size):
 
@@ -156,7 +159,7 @@ class Converter:
         boxes_relative_area = labels[:,3] * labels[:,4]
         boxes_ratio = labels[:,3] / labels[:,4]
 
-        chosen_grids_idxs = torch.abs(boxes_relative_area.repeat((self.grids_relative_area.shape[0],1)).t() - self.grids_relative_area).argmin(-1)
+        chosen_grids_idxs = torch.abs(boxes_relative_area.repeat((self.grids_count,1)).t() - self.grids_relative_area[:self.grids_count]).argmin(-1)
         chosen_grids_shape = self.grids_shape[chosen_grids_idxs]
 
         chosen_abox_idxs = torch.abs(boxes_ratio.repeat((self.abox_count,1)).t() - self.abox_default_scale_ratio[:,1]).argmin(-1)
@@ -182,61 +185,94 @@ class Converter:
             netout[coord, 2] = labels[i,0] % 6 # color class
             netout[coord, 3:5] = (labels[i,1:3] - self.netout_center_offset[coord]) / self.netout_center_multiplier[coord] # center
             netout[coord, 5] = abox_idx # anchor box identifier
-            netout[coord, 6] = (labels[i,3] - self.netout_abox_offset[coord, abox_idx , 0]) / self.netout_abox_multiplier[coord, abox_idx, 0] # scale
-            netout[coord, 7] = (boxes_ratio[i] - self.netout_abox_offset[coord, abox_idx, 1]) / self.netout_abox_multiplier[coord, abox_idx, 1] #ratio
+            netout[coord, 6] = (labels[i,3] - self.netout_abox_offset[coord, abox_idx * 2]) / self.netout_abox_multiplier[coord, abox_idx * 2] # scale
+            netout[coord, 7] = (boxes_ratio[i] - self.netout_abox_offset[coord, abox_idx * 2 + 1]) / self.netout_abox_multiplier[coord, abox_idx * 2 + 1] #ratio
 
         return netout
 
-    def fit_netout(self, netout:torch.Tensor, preserve_original:bool=False):
 
-        assert netout.shape[-1] == 8
+    def convert_netout_to_basic_labels(self, netout:torch.Tensor, probability_threshold:float=0.6, max_iou:float=0.6, apply_nms:bool=True) -> torch.Tensor:
 
-        if preserve_original:
-            netout = netout.clone()
-
-        torch.multiply(netout[..., 3:5], self.netout_center_multiplier[:netout.shape[-2]], out=netout[..., 3:5])
-        torch.add(netout[..., 3:5], self.netout_center_offset[:netout.shape[-2]], out=netout[..., 3:5])
-
-        aboxes_idx = netout[:,5].type(torch.int32)
-        aranged_tensor = torch.arange(netout.shape[-2], dtype=torch.int32)
-        torch.multiply(netout[..., 6:8], self.netout_abox_multiplier[:netout.shape[-2]][aranged_tensor, aboxes_idx], out=netout[..., 6:8])
-        torch.add(netout[..., 6:8], self.netout_abox_offset[:netout.shape[-2]][aranged_tensor, aboxes_idx], out=netout[..., 6:8])
-
-        return netout
-
-    def convert_netout_to_labels(self, netout:torch.Tensor, probability_threshold:float=0.6, max_iou:float=0.6, apply_nms:bool=True) -> torch.Tensor:
-
-        assert len(netout.shape) == 2 # cannot do all batch at once since every image has a different number of boxes
         assert netout.shape == (self.netout_grid_limits[self.grids_count], 1+1+6+2+self.abox_count*(1+2))
 
-        netout = netout.detach()
+        if netout.requires_grad:
+            netout = netout.detach().clone()
 
-        thresholded_netout = netout[netout[:, 0] > probability_threshold]
+        threshold_mask = netout[:, 0] > probability_threshold
+        thresholded_netout = netout[threshold_mask]
+        
+        argmax_tensor = torch.argmax(thresholded_netout[:, 2:8], dim=-1)
+        thresholded_netout[:, 2] = argmax_tensor
+        torch.round(thresholded_netout[:, 1], out=thresholded_netout[:, 1])
+        torch.multiply(thresholded_netout[:, 1], 6, out=thresholded_netout[:, 1])
+        torch.add(thresholded_netout[:, 1], thresholded_netout[:, 2], out=thresholded_netout[:, 1])
+        
+        # fit center
+        torch.multiply(thresholded_netout[..., 8:10], self.netout_center_multiplier[:netout.shape[-2]][threshold_mask], out=thresholded_netout[..., 8:10])
+        torch.add(thresholded_netout[..., 8:10], self.netout_center_offset[:netout.shape[-2]][threshold_mask], out=thresholded_netout[..., 8:10])
 
-        torch.add(thresholded_netout[:, 2], ( 6 * thresholded_netout[:, 1].round()), out=thresholded_netout[:, 1])
+        # fit scale and ratio
+        torch.multiply(thresholded_netout[..., 10+self.abox_count:], self.netout_abox_multiplier[:netout.shape[-2]][threshold_mask], out=thresholded_netout[..., 10+self.abox_count:])
+        torch.add(thresholded_netout[..., 10+self.abox_count:], self.netout_abox_offset[:netout.shape[-2]][threshold_mask], out=thresholded_netout[..., 10+self.abox_count:])
 
-        # choose anchor box for each thresholded detection
-        # thresholded_best_aboxes_idx = thresholded_netout[:, 5].type(torch.int32)
+        # move centers
+        thresholded_netout[:, 2:4] = thresholded_netout[:, 8:10]
 
-        aranged_tensor = torch.arange(thresholded_netout.shape[0], dtype=torch.int32)
-        #thresholded_netout[:, 6] = thresholded_netout[aranged_tensor, 3 + thresholded_best_aboxes_idx] # abox chance (don't know if it's even needed so it's at the end)
-        # torch.multiply(thresholded_best_aboxes_idx, 2, out=thresholded_best_aboxes_idx)
-        thresholded_netout[:, 2] = thresholded_netout[aranged_tensor, 3] #cx
-        thresholded_netout[:, 3] = thresholded_netout[aranged_tensor, 4] #cy
-        thresholded_netout[:, 4] = thresholded_netout[aranged_tensor, 6] #scale (after appling multiplier above this is the same as width)
-        thresholded_netout[:, 5] = thresholded_netout[aranged_tensor, 7] #ratio
+        # identify best abox and move it
+        argmax_tensor = torch.argmax(thresholded_netout[:, 10:10+self.abox_count], dim=-1)
+        thresholded_netout[:, 6] = argmax_tensor
+        torch.multiply(argmax_tensor, 2, out=argmax_tensor)
+        aranged_tensor = torch.arange(thresholded_netout.shape[-2])
+        thresholded_netout[:, 4] = thresholded_netout[aranged_tensor, argmax_tensor + 10 + self.abox_count]
+        thresholded_netout[:, 5] = thresholded_netout[aranged_tensor, argmax_tensor + 11 + self.abox_count]
 
         # convert labels from [p,class,cx,cy,r,s] notation to nms_labels[x1,y1,x2,y2] (needed for nms) and labels[p, class, cx, cy, width, height] (needed as output)
-        labels = thresholded_netout[:, :6].clone()
-        torch.divide(labels[:,4], labels[:,5], out=labels[:,5]) # get height
+        basic_labels = thresholded_netout[:, :6]
+        torch.divide(basic_labels[:,4], basic_labels[:,5], out=basic_labels[:,5]) # get height
 
         if apply_nms:
-            nms_labels = labels[:,2:4].repeat((1,2))
-            torch.add(nms_labels, torch.cat((-labels[:,4:6], labels[:,4:6]), dim=1), out=nms_labels)
+            nms_labels = basic_labels[:,2:4].repeat((1,2))
+            torch.add(nms_labels, torch.cat((-basic_labels[:,4:6], basic_labels[:,4:6]), dim=1), out=nms_labels)
 
-            remaining_boxes = tv.ops.batched_nms(boxes=nms_labels, scores=labels[:,0], idxs=labels[:,1], iou_threshold=max_iou)
+            remaining_boxes = tv.ops.batched_nms(boxes=nms_labels, scores=basic_labels[:,0], idxs=basic_labels[:,1], iou_threshold=max_iou)
 
-            labels = labels[remaining_boxes]
+            basic_labels = basic_labels[remaining_boxes]
 
-        return labels
+        return basic_labels
+
+    def convert_labels_to_basic_labels(self, labels:torch.Tensor) -> torch.Tensor:
+
+        assert labels.shape == (self.netout_grid_limits[self.grids_count], 8)
+
+        labels = labels.clone()
+
+        threshold_mask = labels[:, 0] == 1  
+        thresholded_labels = labels[threshold_mask]
+        
+        # fit centers, scales and ratios
+        # print(self.netout_center_offset[:labels.shape[-2]][threshold_mask])
+        torch.multiply(thresholded_labels[:,3:5], self.netout_center_multiplier[:labels.shape[-2]][threshold_mask], out=thresholded_labels[:,3:5])
+        torch.add(thresholded_labels[:,3:5], self.netout_center_offset[:labels.shape[-2]][threshold_mask], out=thresholded_labels[:,3:5])
+
+        abox_idxs = torch.multiply(thresholded_labels[:,5], 2).type(torch.int32)
+        aranged_tensor = torch.arange(thresholded_labels.shape[-2])
+        torch.multiply(thresholded_labels[:,6], self.netout_abox_multiplier[:labels.shape[-2]][threshold_mask][aranged_tensor, abox_idxs], out=thresholded_labels[:,6])
+        torch.multiply(thresholded_labels[:,7], self.netout_abox_multiplier[:labels.shape[-2]][threshold_mask][aranged_tensor, abox_idxs+1], out=thresholded_labels[:,7])
+        torch.add(thresholded_labels[:,6], self.netout_abox_offset[:labels.shape[-2]][threshold_mask][aranged_tensor, abox_idxs], out=thresholded_labels[:,6])
+        torch.add(thresholded_labels[:,7], self.netout_abox_offset[:labels.shape[-2]][threshold_mask][aranged_tensor, abox_idxs+1], out=thresholded_labels[:,7])
+
+        torch.multiply(thresholded_labels[:,1], 6, out=thresholded_labels[:,1])
+        torch.add(thresholded_labels[:, 2], thresholded_labels[:, 1], out=thresholded_labels[:, 1])
+
+        aranged_tensor = torch.arange(thresholded_labels.shape[0], dtype=torch.int32)
+        thresholded_labels[:, 2] = thresholded_labels[aranged_tensor, 3] #cx
+        thresholded_labels[:, 3] = thresholded_labels[aranged_tensor, 4] #cy
+        thresholded_labels[:, 4] = thresholded_labels[aranged_tensor, 6] #scale (after appling multiplier above this is the same as width)
+        thresholded_labels[:, 5] = thresholded_labels[aranged_tensor, 7] #ratio
+
+        # convert labels from [p,class,cx,cy,r,s] notation to nms_labels[x1,y1,x2,y2] (needed for nms) and labels[p, class, cx, cy, width, height] (needed as output)
+        basic_labels = thresholded_labels[:, :6].clone()
+        torch.divide(basic_labels[:,4], basic_labels[:,5], out=basic_labels[:,5]) # get height
+
+        return basic_labels
 

@@ -12,7 +12,7 @@ def argParser() -> tuple[str, np.ndarray, str]:
 
     args = parser.parse_args()
 
-    assert args.train > 0 and args.val > 0 and args.test > 0
+    assert args.train >= 0 and args.val >= 0 and args.test >= 0
     assert os.path.isdir(args.dataset_path)
 
     split_vars = np.array((args.train, args.val, args.test), dtype=float)
