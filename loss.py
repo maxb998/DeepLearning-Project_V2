@@ -40,7 +40,7 @@ class RisikoLoss(nn.Module):
         self.mse = nn.MSELoss(reduction='sum')
         self.CrossEntropyLoss = nn.CrossEntropyLoss(reduction='sum')
 
-        self.aranged_tensor = torch.arange(batch_size * max_obj, dtype=torch.int32).to(self.device)
+        self.aranged_tensor = torch.arange(batch_size * max_obj, dtype=torch.int32)
 
 
     def forward(self, predictions:torch.Tensor, label:torch.Tensor) -> torch.Tensor:
@@ -51,7 +51,6 @@ class RisikoLoss(nn.Module):
 
         # abox_loss, box_loss, class_obj_loss, class_color_loss, obj_loss = 0,0,0,0,0
 
-        # if (actual_targets.shape[0] > 0):
         # Abox Loss: loss on the selection of the anchor box
         abox_loss = self.CrossEntropyLoss(predictions_targets[..., 10: 10 + self.abox_count], actual_targets[..., 5].type(torch.long))
 
