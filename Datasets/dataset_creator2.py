@@ -63,9 +63,9 @@ def argParser() -> Params:
     parser.add_argument('-O', '--outputDir', metavar='OUTPUT_DIR', type=str, required=True, help='Directory in which the dataset will be generated')
     parser.add_argument('-B', '--backgroundsDir', metavar='BACKGROUNDS_DIR', type=str, required=True, help='Directory containing some images to use as backgrounds')
     parser.add_argument('-N', '--nimgs', metavar='GENERATED_IMAGES_NUMBER', type=restricted_int, required=True, help='number of images to generate')
-    parser.add_argument('--maxobjs', metavar='[N_TANKS,N_FLAGS]', type=restricted_int, nargs=2, default=[80,80], help='Max number of tanks follwed by max number of flags generated in each image')
-    parser.add_argument('--imgShape', metavar='[IMG_WIDTH,IMG_HEIGHT]', type=restricted_int, nargs=2, default=[640,640], help='Output images shape in pixels')
-    parser.add_argument('--objSizeLimits', metavar='[MAX_OBJ_SIZE,MIN_OBJ_SIZE]', type=restricted_int, nargs=2, default=[250,20], help='Limits in size of tank and flag resize after render in pixels(not exactly the max and min size)')
+    parser.add_argument('--maxobjs', metavar='[N_TANKS,N_FLAGS]', type=restricted_int, nargs=2, default=[40,40], help='Max number of tanks follwed by max number of flags generated in each image')
+    parser.add_argument('--imgShape', metavar='[IMG_WIDTH,IMG_HEIGHT]', type=restricted_int, nargs=2, default=[512,512], help='Output images shape in pixels')
+    parser.add_argument('--objSizeLimits', metavar='[MAX_OBJ_SIZE,MIN_OBJ_SIZE]', type=restricted_int, nargs=2, default=[100,30], help='Limits in size of tank and flag resize after render in pixels(not exactly the max and min size)')
     parser.add_argument('--renderRes', metavar='RENDER_RES', type=restricted_int, help='Output images height in pixels (default is maxObjSize). If set lower than maxObjSize than rendered objects might be upscaled')
     parser.add_argument('--maxOverlap', metavar='MAX_OVERLAP', type=float, default=0.5, help='The maximum amount an object can be overlapped by another. Value range: (0,1)')
 
@@ -200,14 +200,16 @@ def cmp_box_intersection_w_areas(newbox:np.ndarray, oldboxes:np.ndarray, maxArea
     xB = np.minimum(newbox[2], np.transpose(x22))
     yB = np.minimum(newbox[3], np.transpose(y22))
 
-    interArea = np.maximum((xB - xA + 1), 0) * np.maximum((yB - yA + 1), 0)
+    interArea = np.maximum((xB - xA), 0) * np.maximum((yB - yA), 0)
 
-    boxAArea = (newbox[2] - newbox[0] + 1) * (newbox[3] - newbox[1] + 1)
-    boxBArea = (x22 - x21 + 1) * (y22 - y21 + 1)
+    boxAArea = (newbox[2] - newbox[0]) * (newbox[3] - newbox[1])
+    boxBArea = (x22 - x21) * (y22 - y21)
 
-    iou = interArea / (boxAArea + boxBArea - interArea)
+    smallerArea = np.minimum(boxAArea, boxBArea)
 
-    if iou.sum() >= maxAreaOverlap:
+    biggerOverlap = interArea / smallerArea
+
+    if biggerOverlap.sum() >= maxAreaOverlap:
         return False
     
     return True

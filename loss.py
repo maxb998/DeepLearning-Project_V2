@@ -60,7 +60,7 @@ class RisikoLoss(nn.Module):
         abox_base_pos = actual_targets[..., 5].type(torch.int32) * 2 + 10 + self.abox_count
         scale_ratio_tensor = torch.stack(
             (predictions_targets[self.aranged_tensor[:predictions_targets.shape[0]], abox_base_pos],
-             predictions_targets[self.aranged_tensor[:predictions_targets.shape[0]], abox_base_pos+1])).t()
+             predictions_targets[self.aranged_tensor[:predictions_targets.shape[0]], abox_base_pos+1])).t_()
         box_loss += self.mse(scale_ratio_tensor, actual_targets[..., 6:8])
 
         # Class Loss: color loss and class obj loss which is a boolean: tank=1, flag=0

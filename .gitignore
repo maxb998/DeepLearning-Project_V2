@@ -7,11 +7,8 @@ __pycache__
 
 # User
 Datasets/Professor_Material
-Datasets/Generated_Dataset/images/
-Datasets/Generated_Dataset/labels/
-Datasets/Generated_Dataset/train
-Datasets/Generated_Dataset/test
-Datasets/Generated_Dataset/val
+Datasets/Generated_Dataset
+Datasets/Generated_Dataset2
 Datasets/Generated_Dataset_BIG/images/
 Datasets/Generated_Dataset_BIG/labels/
 Datasets/Generated_Dataset_BIG/train

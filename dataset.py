@@ -7,26 +7,41 @@ from tqdm import tqdm
 anchor_boxes_yaml_location = './anchor_boxes.yaml'
 
 class RisikoDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_dir:str, cv:Converter,
-                 train_mode:bool=False,
-                 gauss_kernels:tuple[tuple[int,int], ...] = ( (3,3), (5,5), (1,3), (3,1), (1,5), (5,1) ),
-                 gauss_sigmas:tuple[tuple[float,float], ...] = ( (0.1, 2.), (0.05, 2.75), (0.01, 3.5) ),
+
+    is_trainset:bool
+    gauss_kernels:tuple[tuple[int,int], ...]
+    gauss_sigmas:tuple[tuple[float,float], ...]
+    salt_pepper_hval:int
+    cv:Converter
+    images:list[torch.Tensor]
+    images_shape:list[torch.Size]
+    labels:list[torch.Tensor]
+    loss_labels:list[torch.Tensor]
+    img_paths:list[str]
+    norm = tv.transforms.Normalize(mean=(138.330, 116.681, 88.420), std=(51.176, 47.243, 48.665), inplace=False)
+    invnorm = tv.transforms.Normalize(mean=(-138.330/51.176, -116.681/47.243, -88.420/48.665), std=(1/51.176, 1/47.243, 1/48.665), inplace=False) # EXTERNAL USE ONLY
+
+
+    def __init__(self,
+                 dataset_dir:str,
+                 cv:Converter,
+                 is_trainset:bool=False,
+                 gauss_kernels:tuple[tuple[int,int], ...] = ( (3,3), (1,3), (3,1) ),
+                 gauss_sigmas:tuple[tuple[float,float], ...] = ( (0.1, 0.75), (0.05, 1.), (0.01, 1.25) ),
                  salt_pepper_hval:int = 200,
-                 load_all_images_in_memory:bool = False,
+                 labels_extension:str='.csv',
                  ):
         
-        self.train_mode:bool = train_mode
-        self.gauss_kernels:tuple[tuple[int,int], ...] = gauss_kernels
-        self.gauss_sigmas:tuple[tuple[float,float], ...] = gauss_sigmas
-        self.salt_pepper_hval:int = salt_pepper_hval
-        self.imgs_loaded:bool = load_all_images_in_memory
+        self.is_trainset = is_trainset
+        self.gauss_kernels = gauss_kernels
+        self.gauss_sigmas = gauss_sigmas
+        self.salt_pepper_hval = salt_pepper_hval
         self.cv = cv
 
-        self.images:list[torch.Tensor] = []
-        self.images_shape:list[torch.Size] = []
+        self.images = []
 
-        self.basic_labels:list[torch.Tensor] = []
-        self.labels:list[torch.Tensor] = []
+        self.labels = []
+        self.loss_labels = []
         
         imgs_dir = os.path.join(dataset_dir, 'images')
         labels_dir = os.path.join(dataset_dir, 'labels')
@@ -35,48 +50,39 @@ class RisikoDataset(torch.utils.data.Dataset):
 
         prog_bar = tqdm(total=len(self.img_paths))
 
+
         for i in range(len(self.img_paths)):
             self.img_paths[i] = os.path.join(imgs_dir, self.img_paths[i])
 
-            # load image to get shape
+            # load image and label
             img = tv.io.read_image(self.img_paths[i], tv.io.ImageReadMode.RGB)
 
-            # set and check shape(only in train mode)
-            old_netin = self.cv.netin_img_shape
-            self.cv.set_img_original_shape(img.shape)
-            if self.train_mode and old_netin != self.cv.netin_img_shape and i > 0:
-                prog_bar.close()
-                print('Error all images must have the same netin_img_shape, but image ' + str(i) + ' has a different netin_img_shape compared to the previous image')
-                exit()
-
-            if self.imgs_loaded:
-                self.images.append(cv.apply_letterbox_to_image(img))
-            self.images_shape.append(img.shape)
-
-            # load all labels here and format them correctly to spare time during training
-            label_fname = os.path.join(labels_dir, os.path.splitext(os.path.basename(self.img_paths[i]))[0]) + '.csv'
-
+            label_fname = os.path.join(labels_dir, os.path.splitext(os.path.basename(self.img_paths[i]))[0]) + labels_extension
             if os.path.isfile(label_fname):
-                label_file_content = np.genfromtxt(fname=label_fname, delimiter=' ', dtype=np.float32)
+                label = torch.from_numpy(np.genfromtxt(fname=label_fname, delimiter=' ', dtype=np.float32))
 
-                if label_file_content.shape[0] > 0:
-
-                    if len(label_file_content.shape) == 1: # avoid errors (dimension errors with images containing only one object)
-                        self.basic_labels.append(torch.from_numpy(label_file_content).unsqueeze(0))
-                    else:
-                        self.basic_labels.append(torch.from_numpy(label_file_content))
-
-                    self.cv.apply_letterbox_to_labels(self.basic_labels[i])
-
+                if label.shape[0] > 0:
+                    if len(label.shape) == 1: # avoid errors (dimension errors with images containing only one object)
+                        label.unsqueeze_(0)
                 else:
-                    self.basic_labels.append(None)
+                    label = torch.empty((0,5))
             else:
-                self.basic_labels.append(None)
+                label = torch.empty((0,5))
+
+            if img.shape[1] > cv.netin_img_shape or img.shape[2] > cv.netin_img_shape:
+                imgs = cv.split_big_image(img)
+                labels = cv.split_big_labels(label, img.shape)
+            else:
+                letterboxed_img = cv.apply_letterbox_to_image(img)
+                cv.apply_letterbox_to_labels(label, img.shape)
+                imgs, labels = [letterboxed_img,], [label,]
             
-            if self.train_mode:
-                self.labels.append(self.cv.convert_labels_to_netout(self.basic_labels[i], check_coordinate_overlap=True))
-            if self.basic_labels[i] is not None:
-                cv.convert_labels_from_relative_to_absolute_values(self.basic_labels[i])
+            self.images.extend(imgs)
+            self.labels.extend(labels)
+
+            if is_trainset:
+                for lbl in labels:
+                    self.loss_labels.append(cv.convert_labels_to_losslabels(lbl))
             
             prog_bar.update(1)
         
@@ -84,27 +90,21 @@ class RisikoDataset(torch.utils.data.Dataset):
 
                 
     def __len__(self) -> int:
-        return len(self.img_paths)
+        return len(self.images)
     
-    def __getitem__(self, idx:int, return_basic_labels:bool=False) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx:int) -> tuple[torch.Tensor, torch.Tensor]:
 
-        if self.imgs_loaded:
-            img = self.images[idx]
-        else:
-            img = tv.io.read_image(self.img_paths[idx], tv.io.ImageReadMode.RGB)
-            self.cv.set_img_original_shape(img.shape)
-            img = self.cv.apply_letterbox_to_image(img)
+        img = self.images[idx].clone()
 
         # agumentation step
-        if self.train_mode:
-            agumentation_modes_array = np.arange(2, dtype=int)
-            agumentation_modes_array = np.random.permutation(agumentation_modes_array) # allows for effect to apply on top of one another in a random way
+        if self.is_trainset:
+            agumentation_modes_array = torch.randperm(2, dtype=torch.int)
 
             for i in agumentation_modes_array:
-                if np.random.randint(2) == 1:
+                if torch.randint(low=0, high=2, size=(1,))[0] == 1:
                     if i == 0: # gaussian blur
-                        gauss_kernel = self.gauss_kernels[np.random.randint(len(self.gauss_kernels))]
-                        gauss_sigma = self.gauss_sigmas[np.random.randint(len(self.gauss_sigmas))]
+                        gauss_kernel = self.gauss_kernels[torch.randint(low=0, high=len(self.gauss_kernels), size=(1,))[0]]
+                        gauss_sigma = self.gauss_sigmas[torch.randint(low=0, high=len(self.gauss_sigmas), size=(1,))[0]]
                         gauss_transform = tv.transforms.GaussianBlur(gauss_kernel, gauss_sigma)
                         img = gauss_transform(img)
 
@@ -112,23 +112,19 @@ class RisikoDataset(torch.utils.data.Dataset):
                         #generate random tensor, threshold it and apply to some pixel a randomly generated color
                         rnd_tensor = torch.randint_like(input=img, low=0, high=self.salt_pepper_hval+1)
                         mask = rnd_tensor == self.salt_pepper_hval
-                        rnd_tensor = torch.randint_like(input=img, low=0, high=255)
-                        img[mask] = rnd_tensor[mask]
+                        rnd_tensor = torch.randint_like(input=img[mask], low=0, high=255)
+                        img[mask] = rnd_tensor
 
-        # convert image type and normalize from 0 to 1
-        img = img.type(self.cv.netout_dtype) / 256
+        img = self.norm(img.type(self.cv.netout_dtype))
 
-        if return_basic_labels:
-            return img, self.basic_labels[idx]
+        if self.is_trainset:
+            return img, self.loss_labels[idx]
         else:
             return img, self.labels[idx]
     
 
     def get_img_shape(self, index:int) -> torch.Size:
             
-        if self.imgs_loaded:
-            img_shape = self.images[index].shape
-        else:
-            img_shape = tv.io.read_image(self.img_paths[index], tv.io.ImageReadMode.RGB).size()
+        img_shape = self.images[index].shape
 
         return img_shape
