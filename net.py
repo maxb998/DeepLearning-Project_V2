@@ -1,6 +1,7 @@
-import torch, math
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class CBA(nn.Module):
     conv:nn.Conv2d
@@ -31,16 +32,19 @@ class CBA(nn.Module):
         return self.activation.forward(y_bn)
 
 class GridNetBackbone(nn.Module):
-    
-    # M
-    # conv3_ch = (32, 128, 256, 256) 
-    # conv5_ch = (128,)
-    # dconv_ch = (256, 512)
 
-    # L
-    conv3_ch = (48, 196, 384, 384) 
-    conv5_ch = (196,)
-    dconv_ch = (384, 640)
+    ch = {
+        'M' : {
+            'conv3_ch' : (32, 128, 256, 256, 128, 64, 64),
+            'conv5_ch' : (128,),
+            'dconv_ch' : (256, 512)
+        },
+        'L' : {
+            'conv3_ch' : (48, 196, 384, 384, 196, 96, 96),
+            'conv5_ch' : (196,),
+            'dconv_ch' : (384, 640)
+        }
+    }
 
     conv0_3:CBA
     dconv0_4:CBA
@@ -49,21 +53,31 @@ class GridNetBackbone(nn.Module):
     dconv1_2:CBA
     conv2_3:CBA
     conv3_3:CBA
+    conv4_3:CBA
+    conv5_3:CBA
+    conv6_3:CBA
 
     out_channels:int
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, m:str, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        self.conv0_3 = CBA(3, self.conv3_ch[0], 3, 1, 1)
-        self.dconv0_4 = CBA(self.conv3_ch[0], self.dconv_ch[0], 4, 4)
-        self.conv1_3 = CBA(self.dconv_ch[0], self.conv3_ch[1], 3, 1, 1)
-        self.conv1_5 = CBA(self.dconv_ch[0], self.conv5_ch[0], 5, 1, 2)
-        self.dconv1_2 = CBA(self.dconv_ch[0] + self.conv3_ch[1] + self.conv5_ch[0], self.dconv_ch[1], 2, 2)
-        self.conv2_3 = CBA(self.dconv_ch[1], self.conv3_ch[2], 3, 1, 1)
-        self.conv3_3 = CBA(self.conv3_ch[2], self.conv3_ch[3], 3, 1, 1)
+        assert m in self.ch.keys()
 
-        self.out_channels = self.conv3_ch[-1] + self.dconv_ch[-1] + self.conv3_ch[-2]
+        self.conv0_3 = CBA(3, self.ch[m]['conv3_ch'][0], 3, 1, 1)
+        self.dconv0_4 = CBA(self.ch[m]['conv3_ch'][0], self.ch[m]['dconv_ch'][0], 4, 4)
+        self.conv1_3 = CBA(self.ch[m]['dconv_ch'][0], self.ch[m]['conv3_ch'][1], 3, 1, 1)
+        self.conv1_5 = CBA(self.ch[m]['dconv_ch'][0], self.ch[m]['conv5_ch'][0], 5, 1, 2)
+        self.dconv1_2 = CBA(self.ch[m]['dconv_ch'][0] + self.ch[m]['conv3_ch'][1] + self.ch[m]['conv5_ch'][0], self.ch[m]['dconv_ch'][1], 2, 2)
+        self.conv2_3 = CBA(self.ch[m]['dconv_ch'][1], self.ch[m]['conv3_ch'][2], 3, 1, 1)
+        self.conv3_3 = CBA(self.ch[m]['conv3_ch'][2], self.ch[m]['conv3_ch'][3], 3, 1, 1)
+        self.conv4_3 = CBA(self.ch[m]['conv3_ch'][3], self.ch[m]['conv3_ch'][4], 3, 1, 1)
+        self.conv5_3 = CBA(self.ch[m]['conv3_ch'][4], self.ch[m]['conv3_ch'][5], 3, 1, 1)
+        self.conv6_3 = CBA(self.ch[m]['conv3_ch'][5], self.ch[m]['conv3_ch'][6], 3, 1, 1)
+
+        self.out_channels = self.ch[m]['dconv_ch'][-1] # + self.ch[m]['conv3_ch'][-1] + self.ch[m]['conv3_ch'][-2] + self.ch[m]['conv3_ch'][-3] + self.ch[m]['conv3_ch'][-4]
+        for i in range(2, len(self.ch[m]['conv3_ch']), 1):
+            self.out_channels += self.ch[m]['conv3_ch'][i]
 
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
@@ -75,39 +89,49 @@ class GridNetBackbone(nn.Module):
         x1_2 = self.dconv1_2.forward(torch.cat((x0_4, x1_3, x1_5), dim=-3))
         x2_3 = self.conv2_3.forward(x1_2)
         x3_3 = self.conv3_3.forward(x2_3)
+        x4_3 = self.conv4_3.forward(x3_3)
+        x5_3 = self.conv5_3.forward(x4_3)
+        x6_3 = self.conv6_3.forward(x5_3)
 
-        return torch.cat((x1_2, x2_3, x3_3), dim=-3)
+        return torch.cat((x1_2, x2_3, x3_3, x4_3, x5_3, x6_3), dim=-3)
 
 
 class GridNetHead(nn.Module):
 
-    # ch = (512,512) # M
-    ch = (640,640) # L
+    ch = {
+        'XS' : (384,256),
+        'S'  : (512,512),
+        'M'  : (640,640,640),
+        'L'  : (1024,1024,1024,640),
+        'XL': (1024,1024,1024,1024,640)
+    }
 
     layers:nn.ModuleList
     activations:nn.ModuleList
 
-    def __init__(self, in_channels:int, out_channels:int, *args, **kwargs) -> None:
+    def __init__(self, in_channels:int, out_channels:int, m:str, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+
+        assert m in self.ch.keys()
 
         self.layers = nn.ModuleList()
         self.activations = nn.ModuleList()
         
         first_layer_out = out_channels
-        if len(self.ch) > 0:
-            first_layer_out = self.ch[0]
+        if len(self.ch[m]) > 0:
+            first_layer_out = self.ch[m][0]
 
         self.layers.append(nn.Conv2d(in_channels, first_layer_out, 1))
-        for i in range(len(self.ch)-1):
-            self.layers.append(nn.Conv2d(self.ch[i], self.ch[i+1], 1))
+        for i in range(len(self.ch[m])-1):
+            self.layers.append(nn.Conv2d(self.ch[m][i], self.ch[m][i+1], 1))
             self.activations.append(nn.PReLU())
 
         for layer in self.layers:
             nn.init.xavier_uniform_(layer.weight)
         
-        if len(self.ch) > 0:
+        if len(self.ch[m]) > 0:
             self.activations.append(nn.PReLU())
-            self.layers.append(nn.Conv2d(self.ch[-1], out_channels, 1))
+            self.layers.append(nn.Conv2d(self.ch[m][-1], out_channels, 1))
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
 
@@ -125,14 +149,17 @@ class GridNet(nn.Module):
     downscaler:nn.AvgPool2d
     sigmoid_scaler:float
 
-    def __init__(self, abox_count:int, *args, **kwargs) -> None:
+    def __init__(self, abox_count:int, model_size:str, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+
+        model_sizes = model_size.split('-')
+        backbone_size, head_size = model_sizes[0], model_sizes[-1]
 
         self.abox_count = abox_count
         out_channels = 10 + 3 * abox_count
 
-        self.backbone = GridNetBackbone()
-        self.head = GridNetHead(self.backbone.out_channels, out_channels)
+        self.backbone = GridNetBackbone(backbone_size)
+        self.head = GridNetHead(self.backbone.out_channels, out_channels, head_size)
 
         self.downscaler = nn.AvgPool2d(kernel_size=(2,2), stride=(2,2))
 

@@ -4,13 +4,14 @@ from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 from dataset import RisikoDataset
 from utils import Converter
-from net import GridNet
+from net import GridNet, GridNetBackbone, GridNetHead
 from loss import RisikoLoss
 
 class TrainingParams:
     epochs:int
     batch:int
     lr:float
+    model_size:str
     dataset_path:str
     weights_path:str
     load_weights:bool
@@ -22,6 +23,7 @@ def argParser() -> TrainingParams:
     parser.add_argument('-e', '--epochs', metavar='INT', type=int, required=True, help='Number of epochs')
     parser.add_argument('-b', '--batch', metavar='INT', type=int, required=True, help='Batch size')
     parser.add_argument('-lr', metavar='FLOAT', type=float, required=True, help='Learning rate')
+    parser.add_argument('--model_size', metavar='STR', type=str, required=True, help='Size of the model specified as \'M\', \'L\' or a supported combination like \'M-XXL\' or \'L-XL\'')
     parser.add_argument('--weights_path', metavar='PATH', type=str, help='Path to directory in which the weights are saved', default='weights')
     parser.add_argument('--dataset_path', metavar='STR', type=str, required=True, help='Path to the dataset. Inside the specified directory there must directories \'train\', \'val\' and \'test\' containing the respective datasets')
     parser.add_argument('--new_weights', action='store_false', help='Specify wether or not loading existing weights if any')
@@ -38,13 +40,14 @@ def argParser() -> TrainingParams:
     t.epochs = args.epochs
     t.batch = args.batch
     t.lr = torch.tensor(args.lr, dtype=float)
+    t.model_size = args.model_size
     t.dataset_path = args.dataset_path
     t.weights_path = args.weights_path
     t.load_weights = args.new_weights
 
     return t
 
-def get_score(model:GridNet, dataset:RisikoDataset, mean_ap_obj:MeanAveragePrecision, device:str='cpu', prob_threshold:float=0.5, iou_threshold:float=0.7) -> float:
+def get_score(model:GridNet, dataset:RisikoDataset, mean_ap_obj:MeanAveragePrecision, device:str='cpu', prob_threshold:float=0.5, iou_threshold:float=0.75) -> float:
 
     mAP = 0
     map_50 = 0
@@ -95,20 +98,31 @@ def main():
 
     p = argParser()
 
+    sizes = p.model_size.split('-')
+    assert sizes[0] in GridNetBackbone.ch.keys()
+    assert sizes[-1] in GridNetHead.ch.keys()
+
+    weights_fnames = os.listdir(p.weights_path)
+    best_map = float(0)
+    for w_name in weights_fnames:
+        if 'best_' + p.model_size in w_name:
+            best_map = float(w_name.split('_')[-1])
+
     cv = Converter(netout_dtype=torch.float32)
     print('Loading training set...')
-    trainset = RisikoDataset(dataset_dir=os.path.join(p.dataset_path, 'train'), cv=cv, is_trainset=True)
+    trainset = RisikoDataset(os.path.join(p.dataset_path, 'train'), cv, is_trainset=True)
     print('Loading validation set...')
-    validationset = RisikoDataset(dataset_dir=os.path.join(p.dataset_path, 'val'), cv=cv, is_trainset=False)
-    # print('Loading test set...')
+    validationset = RisikoDataset(os.path.join(p.dataset_path, 'val'), cv)
+    print('Loading test set...')
+    testset = RisikoDataset(os.path.join(p.dataset_path, 'test'), cv)
     print()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    model = GridNet(cv.abox_count).to(device)
+    model = GridNet(cv.abox_count, p.model_size)
     loss_func = RisikoLoss(lambda_abox=0.1,
                       lambda_coord=1.,
-                      lambda_no_obj=0.2,
+                      lambda_no_obj=0.4,
                       lambda_class_obj=1,
                       lambda_class_color=0.1,
                       abox_count=cv.abox_count,
@@ -118,19 +132,20 @@ def main():
     if p.load_weights:
         weights_fnames = os.listdir(p.weights_path)
         for w_name in weights_fnames:
-            if 'last_model' in w_name:
-                print('loading previous weights')
-                model = torch.load(os.path.join(p.weights_path, w_name)).to(device)
+            if 'best_' + p.model_size in w_name:
+                print('loading previous weights: ' + w_name)
+                model = torch.load(os.path.join(p.weights_path, w_name))
+                break
     
+    model.to(device)    
 
-    adam = torch.optim.Adam(model.parameters(), weight_decay=0.001, lr=p.lr)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=adam, gamma=0.96)
+    adam = torch.optim.Adam(model.parameters(), weight_decay=0, lr=p.lr)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=adam, gamma=0.95)
     mean_ap_obj = MeanAveragePrecision(box_format='cxcywh', iou_type='bbox')
     mean_ap_obj.warn_on_many_detections = False
 
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=p.batch, shuffle=True, num_workers=8, pin_memory=True, drop_last=True)
 
-    best_map = 0
     loss_sum = int(0)
 
     for epoch in range(p.epochs):
@@ -159,20 +174,34 @@ def main():
 
         model.eval()
 
-        mAP = get_score(model=model, dataset=validationset, mean_ap_obj=mean_ap_obj, device=device, prob_threshold=0.5, iou_threshold=0.75)
+        mAP = get_score(model, validationset, mean_ap_obj, device)
         if mAP > best_map:
             best_map = mAP
             weights_fnames = os.listdir(p.weights_path)
             for w_name in weights_fnames:
-                if 'best_model' in w_name:
+                if 'best_' + p.model_size in w_name:
                     os.remove(os.path.join(p.weights_path, w_name))
-            torch.save(model, os.path.join(p.weights_path, 'best_model_' + str(round(mAP*100))))
+            torch.save(model, os.path.join(p.weights_path, 'best_' + p.model_size + '_' + 'e' + str(epoch) + '_' + str(mAP).replace('.', '-')))
 
         weights_fnames = os.listdir(p.weights_path)
         for w_name in weights_fnames:
-            if 'last_model' in w_name:
+            if 'last_' + p.model_size in w_name:
                 os.remove(os.path.join(p.weights_path, w_name))
-        torch.save(model, os.path.join(p.weights_path, 'last_model_' + str(round(mAP*100))))
+        torch.save(model, os.path.join(p.weights_path, 'last_' + p.model_size + '_' + 'e' + str(epoch) + '_' + str(mAP).replace('.', '-')))
+    
+    print()
+    print('Computing score on testset using latest weights')
+    print('Score on testset is: ' + str(get_score(model, testset, mean_ap_obj, device)))
+
+    weights_fnames = os.listdir(p.weights_path)
+    for w_name in weights_fnames:
+        if 'best_' + p.model_size in w_name:
+            model = torch.load(os.path.join(p.weights_path, w_name))
+            print()
+            print('Computing score on testset using best weights: ' + w_name)
+            print('Score on testset is: ' + str(get_score(model, testset, mean_ap_obj, device)))
+
+    
 
     return 0
 

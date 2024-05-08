@@ -12,6 +12,7 @@ class Converter:
     abox_count:int  # number of anchor boxes used
     abox_default_ratio_sqrt:torch.Tensor # tensor of size [2, abox_count] containing reference(default) values for ratio (under sqrt) of each anchor box
     netout_dtype:torch.dtype
+    focused:bool # define the detection max and min sizes in each grid cell
 
     big_image_split_overlap:int=int(1)
 
@@ -24,9 +25,10 @@ class Converter:
 
     image_scaler:tv.transforms.Resize
 
-    def __init__(self, netin_img_shape:int=512, netout_dtype:torch.dtype=torch.float32, abox_def_file_path:str='./anchor_boxes.yaml') -> None:
+    def __init__(self, focused:bool=False, netin_img_shape:int=512, netout_dtype:torch.dtype=torch.float32, abox_def_file_path:str='./anchor_boxes.yaml') -> None:
 
         self.netout_dtype = netout_dtype
+        self.focused = focused
 
         assert math.log2(netin_img_shape) % 1 == 0 and netin_img_shape >= 64
         self.netin_img_shape = netin_img_shape
@@ -58,12 +60,17 @@ class Converter:
         self.netout_center_multiplier = torch.empty(size=(self.netout_grid_limits[-1],2), dtype=netout_dtype, memory_format=mem_format)
         self.netout_abox_offset = torch.empty(size=(self.netout_grid_limits[-1],self.abox_count,2), dtype=netout_dtype, memory_format=mem_format)
         self.netout_abox_multiplier = torch.empty(size=(self.netout_grid_limits[-1],self.abox_count,2), dtype=netout_dtype, memory_format=mem_format)
+
+        scale_multiplier, scale_offset  = float(3), float(1)
+        if focused:
+            scale_multiplier, scale_offset  = math.sqrt(2), math.sqrt(2)
+            
         for i in range(self.grids_count):
             l1, l2 = self.netout_grid_limits[i], self.netout_grid_limits[i+1] # to make the code more readable
 
             # set multiplier tensor
-            self.netout_center_multiplier[l1:l2,:] = 1. / self.grids_shape[i].type(self.netout_dtype)
-            self.netout_abox_multiplier[l1:l2,:,0] = 3 / self.grids_shape[i].type(self.netout_dtype) # 3
+            self.netout_center_multiplier[l1:l2,:] = 1 / self.grids_shape[i].type(self.netout_dtype)
+            self.netout_abox_multiplier[l1:l2,:,0] = scale_multiplier / self.grids_shape[i].type(self.netout_dtype) # 3
             self.netout_abox_multiplier[l1:l2,:,1] = 1 # ratio does not scale with grid size
 
             # set offset tensor
@@ -71,7 +78,7 @@ class Converter:
             aranged_tensor = torch.arange(start=1e-6, end=1-self.netout_center_multiplier[l1, 0]/2, step=self.netout_center_multiplier[l1, 0], dtype=netout_dtype) # makes center_offsets have range [0,1]
             self.netout_center_offset[l1:l2,0] = aranged_tensor.repeat(self.grids_shape[i])
             self.netout_center_offset[l1:l2,1] = aranged_tensor.repeat_interleave(self.grids_shape[i])
-            self.netout_abox_offset[l1:l2,:,0] = 1/self.grids_shape[i].type(self.netout_dtype) # 1 # area offset
+            self.netout_abox_offset[l1:l2,:,0] = scale_offset / self.grids_shape[i].type(self.netout_dtype) # 1 # area offset
             self.netout_abox_offset[l1:l2,:,1] = self.abox_default_ratio_sqrt - 0.5 #* self.netout_abox_multiplier[l1,:,1] # ratio offset
         
         # flatten to work best with multiplication
@@ -128,10 +135,6 @@ class Converter:
         else:
             labels[...,1:].mul_(torch.tensor((original_img_shape[2], original_img_shape[1], original_img_shape[2], original_img_shape[1]), dtype=labels.dtype))
 
-        # round allowing for .25 .5 .75 or integers
-        # labels.mul_(4)
-        # labels.round_()
-        # labels.div_(4)
 
     def convert_labels_from_absolute_to_relative_values(self, labels:torch.Tensor, original_img_shape:torch.Size=None):
         if original_img_shape is None:
@@ -228,8 +231,12 @@ class Converter:
         boxes_relative_area_sqrt = torch.sqrt(labels[:,3] * labels[:,4]).repeat_interleave(repeats=self.grids_count)
         boxes_ratio_sqrt = torch.sqrt(labels[:,3] / labels[:,4]).repeat_interleave(repeats=self.grids_count)
 
-        grids_map = torch.logical_and(boxes_relative_area_sqrt > self.grids_relative_area_sqrt[:self.grids_count].repeat(labels.shape[0]) / 2, 
-                                      boxes_relative_area_sqrt < self.grids_relative_area_sqrt[:self.grids_count].repeat(labels.shape[0]) * 2)
+        if self.focused:
+            grids_map = torch.logical_and(boxes_relative_area_sqrt > self.grids_relative_area_sqrt[:self.grids_count].repeat(labels.shape[0]) / math.sqrt(2),
+                                        boxes_relative_area_sqrt < self.grids_relative_area_sqrt[:self.grids_count].repeat(labels.shape[0]) * math.sqrt(2))
+        else:
+            grids_map = torch.logical_and(boxes_relative_area_sqrt > self.grids_relative_area_sqrt[:self.grids_count].repeat(labels.shape[0]) / 2, 
+                                        boxes_relative_area_sqrt < self.grids_relative_area_sqrt[:self.grids_count].repeat(labels.shape[0]) * 2)
         
         ones = torch.zeros(size=(labels.shape[0], self.grids_count), dtype=torch.int32)
         ones[grids_map.reshape(labels.shape[0], self.grids_count)] = 1
