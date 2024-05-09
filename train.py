@@ -47,18 +47,18 @@ def argParser() -> TrainingParams:
 
     return t
 
-def get_score(model:GridNet, dataset:RisikoDataset, mean_ap_obj:MeanAveragePrecision, device:str='cpu', prob_threshold:float=0.5, iou_threshold:float=0.75) -> float:
+def get_score(model:GridNet, dataset:RisikoDataset, mean_ap_obj:MeanAveragePrecision, device:str='cpu', prob_threshold:float=0.5, iou_threshold:float=0.5, dataset_name:str='validation') -> float:
 
     mAP = 0
-    map_50 = 0
+    mAP_50 = 0
     mAP_75 = 0
     detections = 0
     effective_objs = 0
 
     assert dataset.is_trainset == False
 
-    pbar = tqdm(len(dataset), desc='\t Evaluating mAP on validation set', unit='sample', leave=True)
-    pbar.set_postfix(mAP=0, map_50=0, mAP_75=0, avg_detect=0, avg_objs=0)
+    pbar = tqdm(len(dataset), desc='\t Evaluating mAP on ' + dataset_name + ' set', unit='samples', leave=True)
+    pbar.set_postfix(mAP=0, mAP_50=0, mAP_75=0, avg_detect=0, avg_objs=0)
 
     for i in range(len(dataset)):
         img_tensor, target_labels = dataset.__getitem__(i)
@@ -75,23 +75,29 @@ def get_score(model:GridNet, dataset:RisikoDataset, mean_ap_obj:MeanAveragePreci
         dataset.cv.convert_labels_from_relative_to_absolute_values(target_labels)
         detections += pred_labels.shape[0]
 
-        # get labels absolute values
-        target_i['boxes'] = target_labels[:,1:]
-        target_i['labels'] = target_labels[:,0].type(torch.int32)
+        if target_labels.shape[0] == 0:
+            if pred_labels.shape[0] == 0:
+                mAP += 1
+                mAP_50 += 1
+                mAP_75 += 1
+        else:
+            # get labels absolute values
+            target_i['boxes'] = target_labels[:,1:]
+            target_i['labels'] = target_labels[:,0].type(torch.int32)
 
-        preds_i['boxes'] = pred_labels[:,2:]
-        preds_i['scores'] = pred_labels[:,0]
-        preds_i['labels'] = pred_labels[:,1].type(torch.int32)
+            preds_i['boxes'] = pred_labels[:,2:]
+            preds_i['scores'] = pred_labels[:,0]
+            preds_i['labels'] = pred_labels[:,1].type(torch.int32)
 
-        mAP_dict = mean_ap_obj.forward([preds_i], [target_i])
-        mAP += mAP_dict['map']
-        map_50 += mAP_dict['map_50']
-        mAP_75 += mAP_dict['map_75']
+            mAP_dict = mean_ap_obj.forward([preds_i], [target_i])
+            mAP += mAP_dict['map'].item()
+            mAP_50 += mAP_dict['map_50'].item()
+            mAP_75 += mAP_dict['map_75'].item()
 
-        pbar.set_postfix(mAP=mAP.item()/(i+1), map_50=map_50.item()/(i+1), mAP_75=mAP_75.item()/(i+1), avg_detect=detections/(i+1), avg_objs=effective_objs/(i+1))
+        pbar.set_postfix(mAP=mAP/(i+1), map_50=mAP_50/(i+1), mAP_75=mAP_75/(i+1), avg_detect=detections/(i+1), avg_objs=effective_objs/(i+1))
         pbar.update(1)
 
-    return mAP.item()/len(dataset)
+    return mAP/len(dataset)
 
 
 def main():
@@ -106,7 +112,7 @@ def main():
     best_map = float(0)
     for w_name in weights_fnames:
         if 'best_' + p.model_size in w_name:
-            best_map = float(w_name.split('_')[-1])
+            best_map = float(w_name.split('_')[-1].replace('-', '.'))
 
     cv = Converter(netout_dtype=torch.float32)
     print('Loading training set...')
@@ -122,7 +128,7 @@ def main():
     model = GridNet(cv.abox_count, p.model_size)
     loss_func = RisikoLoss(lambda_abox=0.1,
                       lambda_coord=1.,
-                      lambda_no_obj=0.4,
+                      lambda_no_obj=0.5,
                       lambda_class_obj=1,
                       lambda_class_color=0.1,
                       abox_count=cv.abox_count,
@@ -132,15 +138,15 @@ def main():
     if p.load_weights:
         weights_fnames = os.listdir(p.weights_path)
         for w_name in weights_fnames:
-            if 'best_' + p.model_size in w_name:
+            if 'last_' + p.model_size in w_name:
                 print('loading previous weights: ' + w_name)
                 model = torch.load(os.path.join(p.weights_path, w_name))
                 break
     
     model.to(device)    
 
-    adam = torch.optim.Adam(model.parameters(), weight_decay=0, lr=p.lr)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=adam, gamma=0.95)
+    adam = torch.optim.Adam(model.parameters(), weight_decay=0.0001, lr=p.lr)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=adam, gamma=0.96)
     mean_ap_obj = MeanAveragePrecision(box_format='cxcywh', iou_type='bbox')
     mean_ap_obj.warn_on_many_detections = False
 
@@ -167,7 +173,7 @@ def main():
 
             adam.step()
 
-            pbar.set_postfix(loss=loss_sum/(batch_idx+1), lr=scheduler.get_last_lr()[0].item())
+            pbar.set_postfix(loss=loss.item()/p.batch, avg_loss=loss_sum/(batch_idx+1), lr=scheduler.get_last_lr()[0].item())
 
         pbar.close()
         scheduler.step()
@@ -191,7 +197,7 @@ def main():
     
     print()
     print('Computing score on testset using latest weights')
-    print('Score on testset is: ' + str(get_score(model, testset, mean_ap_obj, device)))
+    print('Score on testset is: ' + str(get_score(model, testset, mean_ap_obj, device, dataset_name='test')))
 
     weights_fnames = os.listdir(p.weights_path)
     for w_name in weights_fnames:
@@ -199,7 +205,7 @@ def main():
             model = torch.load(os.path.join(p.weights_path, w_name))
             print()
             print('Computing score on testset using best weights: ' + w_name)
-            print('Score on testset is: ' + str(get_score(model, testset, mean_ap_obj, device)))
+            print('Score on testset is: ' + str(get_score(model, testset, mean_ap_obj, device, dataset_name='test')))
 
     
 

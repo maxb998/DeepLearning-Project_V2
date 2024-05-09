@@ -8,13 +8,5 @@ __pycache__
 # User
 Datasets/Professor_Material
 Datasets/Generated_Dataset
-Datasets/Generated_Dataset2
-Datasets/Generated_Dataset_BIG/images/
-Datasets/Generated_Dataset_BIG/labels/
-Datasets/Generated_Dataset_BIG/train
-Datasets/Generated_Dataset_BIG/test
-Datasets/Generated_Dataset_BIG/val
+Datasets/Mixed_Dataset
 *.pdf
-
-
-weights/wide_OLD
